@@ -1,7 +1,7 @@
 /**
- * Streaming output motion: the transcript and the reasoning summary reveal their
- * text progressively instead of appearing a chunk at a time, and the reasoning
- * summary rolls its old line out when a new paragraph completes.
+ * Streaming output motion: the transcript reveals its text character by
+ * character, and every live one-line label in the work steps rolls its previous
+ * line out when the text behind it changes.
  *
  * WHY THIS ONLY TOUCHES THE VISUAL LAYER
  *
@@ -11,31 +11,54 @@
  * assistive technology would all read a truncated transcript.
  *
  * So the text is never truncated. Every character stays in the DOM from the moment
- * the model produces it, and only a `mask-image` moves: everything above the
- * reveal line paints, everything below it is transparent. Layout is therefore
- * final the instant a chunk arrives, and the animation cannot disagree with it.
+ * the model produces it, and only a `mask-image` moves. Layout is therefore final
+ * the instant a chunk arrives, and the animation cannot disagree with it.
  *
- * The reveal itself is driven by a transition on a registered custom property, so
- * it runs off the main thread. This layer only computes a duration each time text
- * arrives — a function of how far behind the reveal is — which is the flow
- * smoothing: a burst of output gives a faster catch-up, a trickle gives a slow
- * crawl, and the two never look different from each other.
+ * CHARACTER GRANULARITY, WITHOUT SPLITTING TEXT
+ *
+ * A horizontal reveal line can only advance a whole line at a time, which reads as
+ * a line flashing in rather than as typing. Tilting the line solves that: with the
+ * mask tilted so that it falls exactly one line height across the element's width,
+ * the boundary crosses one line from start to end while it descends by that same
+ * line height. Exactly one line is partly revealed at any moment, and characters
+ * within it appear left to right.
+ *
+ * The tilt is derived per element from its width and line height, so a narrow
+ * panel gets the same character-level sweep a wide one does.
+ *
+ * The reveal is driven by a transition on a registered custom property, so it runs
+ * off the main thread. This layer only computes a duration each time text arrives
+ * — a function of how far behind the reveal is — which is the flow smoothing: a
+ * burst of output gives a faster catch-up, a trickle gives a slow crawl.
  */
 
 import { type MotionSettings } from './shared.ts'
 
-/** The attributes this layer reads and writes. */
+/** The attribute this layer writes to mark what it is animating. */
 const STREAM_ATTRIBUTE = 'data-dsh-uix-stream'
 
-/**
- * Elements carrying this attribute are mid-stream: `AssistantMarkdown` sets it on
- * its root while a message is still being produced, and `ReasoningRow` sets it on
- * the one-line summary while reasoning is still arriving.
- */
-const STREAMING = '[data-streaming]'
+/** Remembers the text an element showed before its current update. */
+const LAST_ATTRIBUTE = 'data-dsh-uix-last'
 
-/** Reveal distance below which nothing is animated, in CSS pixels. */
-const MIN_REVEAL_PX = 6
+/**
+ * Elements that carry live text.
+ *
+ * `AssistantMarkdown` puts `data-streaming` on its root while a message is being
+ * produced; `ReasoningRow` puts it on the one-line summary; and every live label in
+ * the work steps — a process group title, the running status — goes through
+ * `TextShimmer`, which marks its root with `data-shimmer` while it is animating.
+ */
+const LIVE = '[data-streaming], [data-shimmer]'
+
+/**
+ * Reveal distance below which a new position is written without a transition.
+ *
+ * Deliberately tiny: chunks usually add only a few pixels, and skipping those
+ * would make every small arrival snap — which is exactly the line-at-a-time look
+ * this layer exists to remove. Retargeting an in-flight transition on every chunk
+ * is what keeps the reveal continuous.
+ */
+const MIN_REVEAL_PX = 0.5
 
 /** Reveal transition bounds, in milliseconds. */
 const MIN_REVEAL_MS = 90
@@ -47,68 +70,25 @@ const MAX_REVEAL_MS = 480
  */
 const REVEAL_PX_PER_MS = 0.55
 
-/** How long the reasoning summary's roll takes. */
+/** How long a live label's roll takes. */
 const ROLL_MS = 260
+
+/** Steepest tilt allowed, so a very narrow box does not become a vertical wipe. */
+const MAX_TILT_DEG = 30
 
 /** One element's reveal state. */
 interface Reveal {
-  /** Height the element had when the last chunk landed. */
+  /** Reveal position the element had when the last chunk landed. */
   shown: number
-  /** Height the element reached with this chunk. */
+  /** Reveal position the element reaches with this chunk. */
   target: number
-  /** Pending frame, or 0. */
-  frame: number
-}
-
-declare const document: {
-  readonly documentElement: {
-    readonly style: {
-      setProperty(name: string, value: string): void
-      removeProperty(name: string): string
-    }
-  }
-  querySelectorAll(selectors: string): { readonly length: number; [index: number]: ElementLike | undefined }
-  createElement(tag: 'style'): { textContent: string; remove(): void }
-  readonly head: { appendChild(node: unknown): unknown }
-  readonly body: unknown
-}
-
-declare const window: {
-  requestAnimationFrame(callback: (time: number) => void): number
-  cancelAnimationFrame(handle: number): void
-  setTimeout(callback: () => void, delay: number): number
-  matchMedia(query: string): { readonly matches: boolean }
-  getComputedStyle(element: unknown): { readonly whiteSpace: string }
-}
-
-declare const MutationObserver: new (callback: () => void) => {
-  observe(target: unknown, options: { childList?: boolean; subtree?: boolean; characterData?: boolean; attributes?: boolean; attributeFilter?: string[] }): void
-  disconnect(): void
-}
-
-/** The element face this layer measures. */
-interface ElementLike {
-  getAttribute(name: string): string | null
-  setAttribute(name: string, value: string): void
-  removeAttribute(name: string): void
-  hasAttribute(name: string): boolean
-  readonly scrollHeight: number
-  readonly clientHeight: number
-  readonly style: {
-    setProperty(name: string, value: string): void
-    removeProperty(name: string): string
-    transition: string
-  }
-  readonly dataset: Record<string, string | undefined>
-  textContent: string | null
-  closest(selectors: string): unknown
 }
 
 /**
  * The stylesheet this layer installs.
  *
- * `@property` is what makes the reveal animatable at all: an unregistered custom
- * property is a string, and a string cannot be interpolated. Registering it as a
+ * `@property` is what makes the reveal animatable: an unregistered custom property
+ * is an opaque string, and a string cannot be interpolated. Registering it as a
  * length lets the transition — and therefore the compositor — do the work instead
  * of a per-frame script.
  */
@@ -119,24 +99,30 @@ const STREAM_CSS = `
   initial-value: 0px;
 }
 
-/* The mask is a reveal line with a soft trailing edge, so text arrives out of a
-   gradient rather than appearing at a hard boundary. The trailing band is one
-   line tall, which is what keeps the newest line readable while it fades in. */
-[${STREAM_ATTRIBUTE}] {
+@property --dsh-uix-tilt {
+  syntax: '<angle>';
+  inherits: false;
+  initial-value: 180deg;
+}
+
+/* The mask is a tilted reveal line with a soft trailing edge, so text arrives out
+   of a gradient rather than at a hard boundary. The tilt makes it fall one line
+   height across the width, which is what gives character granularity. */
+[${STREAM_ATTRIBUTE}="reveal"] {
   --dsh-uix-reveal: 0px;
   mask-image: linear-gradient(
-    to bottom,
-    #000 calc(var(--dsh-uix-reveal) - 1lh),
+    var(--dsh-uix-tilt),
+    #000 calc(var(--dsh-uix-reveal) - 0.6lh),
     transparent var(--dsh-uix-reveal)
   );
   mask-size: 100% 100%;
   mask-repeat: no-repeat;
 }
 
-/* Only the reasoning summary rolls. It is a single nowrap line, so a vertical
-   translate is unambiguous; multi-line bodies would need a different metaphor. */
+/* A live one-line label does not reveal; its whole text is replaced at once, so the
+   change itself is what has to be animated. The outgoing copy rides a pseudo
+   element, which keeps it out of the layout and out of the accessibility tree. */
 [${STREAM_ATTRIBUTE}="roll"] {
-  mask-image: none;
   position: relative;
   overflow: hidden;
 }
@@ -145,7 +131,8 @@ const STREAM_CSS = `
   content: attr(data-dsh-uix-prev);
   position: absolute;
   inset: 0;
-  color: var(--dsw-alias-label-tertiary);
+  color: inherit;
+  white-space: nowrap;
   pointer-events: none;
   opacity: 0;
 }
@@ -159,17 +146,17 @@ const STREAM_CSS = `
 }
 
 @keyframes dsh-uix-roll-in {
-  from { transform: translateY(0.9lh); opacity: 0; }
+  from { transform: translateY(0.85lh); opacity: 0; }
   to { transform: translateY(0); opacity: 1; }
 }
 
 @keyframes dsh-uix-roll-out {
   from { transform: translateY(0); opacity: 1; }
-  to { transform: translateY(-0.9lh); opacity: 0; }
+  to { transform: translateY(-0.85lh); opacity: 0; }
 }
 
 @media (prefers-reduced-motion: reduce) {
-  [${STREAM_ATTRIBUTE}] {
+  [${STREAM_ATTRIBUTE}="reveal"] {
     mask-image: none;
   }
 
@@ -179,6 +166,49 @@ const STREAM_CSS = `
   }
 }
 `
+
+declare const document: {
+  querySelectorAll(selectors: string): { readonly length: number; [index: number]: ElementLike | undefined }
+  createElement(tag: 'style'): { textContent: string; remove(): void }
+  readonly head: { appendChild(node: unknown): unknown }
+  readonly body: unknown
+}
+
+declare const window: {
+  requestAnimationFrame(callback: (time: number) => void): number
+  cancelAnimationFrame(handle: number): void
+  setTimeout(callback: () => void, delay: number): number
+  matchMedia(query: string): { readonly matches: boolean }
+  getComputedStyle(element: unknown): {
+    readonly whiteSpace: string
+    readonly lineHeight: string
+    readonly width: string
+  }
+}
+
+declare const MutationObserver: new (callback: () => void) => {
+  observe(target: unknown, options: Record<string, unknown>): void
+  disconnect(): void
+}
+
+/** The element face this layer measures. */
+interface ElementLike {
+  getAttribute(name: string): string | null
+  setAttribute(name: string, value: string): void
+  removeAttribute(name: string): void
+  hasAttribute(name: string): boolean
+  readonly scrollHeight: number
+  readonly clientHeight: number
+  readonly clientWidth: number
+  readonly parentElement: ElementLike | null
+  readonly style: {
+    setProperty(name: string, value: string): void
+    removeProperty(name: string): string
+    transition: string
+  }
+  textContent: string | null
+  closest(selectors: string): unknown
+}
 
 /**
  * Build the streaming-output layer. It starts inert; `apply` installs it.
@@ -190,19 +220,13 @@ export function createStreamMotion(): {
 } {
   const reveals = new Map<ElementLike, Reveal>()
   let sheet: { textContent: string; remove(): void } | undefined
-  let observer: {
-    disconnect(): void
-    observe(target: unknown, options: Record<string, unknown>): void
-  } | undefined
+  let observer: { disconnect(): void; observe(target: unknown, options: Record<string, unknown>): void } | undefined
   let settings: MotionSettings | undefined
   let pending = false
   let installed = false
-  let easedCurve = ''
+  let ease = ''
 
-  /**
-   * Whether the current policy asks for no motion at all.
-   * @returns whether the reveal should be skipped.
-   */
+  /** Whether the current policy asks for no motion at all. */
   function still(): boolean {
     const active = settings
     if (active === undefined) return true
@@ -211,17 +235,50 @@ export function createStreamMotion(): {
   }
 
   /**
-   * Whether an element is a one-line summary rather than a multi-line body.
+   * Whether an element is a one-line label rather than the transcript body.
    *
-   * Height cannot answer this: a body sizes itself to its content, so its scroll
-   * height equals its client height exactly like a one-line summary's does. The
-   * distinguishing property is `white-space`, which the summary sets to `nowrap`.
+   * Two signals, both the application's own. A `TextShimmer` root
+   * (`data-shimmer`) is only ever used for a live inline label, never for a
+   * paragraph. A `data-streaming` element is a label when it is `nowrap` — the
+   * reasoning summary — and the body otherwise.
    *
-   * @param element - the streaming element.
+   * Height cannot be used: a body sizes itself to its content, so its scroll height
+   * equals its client height exactly like a one-line label's does.
+   *
+   * @param element - the live element.
    * @returns whether it should roll instead of reveal.
    */
-  function isSummary(element: ElementLike): boolean {
+  function isLabel(element: ElementLike): boolean {
+    if (element.hasAttribute('data-shimmer')) return true
     return window.getComputedStyle(element).whiteSpace === 'nowrap'
+  }
+
+  /**
+   * The tilt that makes the reveal line fall one line height across the element's
+   * width. With that tilt, the boundary sweeps a line left to right exactly while
+   * it descends by one line, which is what turns a line-at-a-time reveal into a
+   * character-at-a-time one.
+   * @param element - the element being revealed.
+   * @param lineHeight - its computed line height in pixels.
+   * @returns the CSS gradient angle.
+   */
+  function tiltFor(element: ElementLike, lineHeight: number): string {
+    const width = element.clientWidth
+    if (width <= 0 || lineHeight <= 0) return '180deg'
+    const ratio = Math.min(1, lineHeight / width)
+    const tilt = Math.asin(ratio) * 180 / Math.PI
+    return `${180 - Math.min(MAX_TILT_DEG, tilt)}deg`
+  }
+
+  /**
+   * The reveal position at which an element is fully painted. The mask line is
+   * tilted, so the far corner is one line height beyond the content height.
+   * @param element - the element being revealed.
+   * @param lineHeight - its computed line height in pixels.
+   * @returns the terminal reveal position in pixels.
+   */
+  function terminal(element: ElementLike, lineHeight: number): number {
+    return element.scrollHeight + lineHeight
   }
 
   /**
@@ -238,39 +295,43 @@ export function createStreamMotion(): {
   }
 
   /**
-   * Reveal an element up to its current height.
-   * @param element - the streaming element.
+   * Advance one element's reveal to cover what just arrived.
+   * @param element - the element being revealed.
    * @param state - its reveal state.
    */
   function advance(element: ElementLike, state: Reveal): void {
     const active = settings
     if (active === undefined) return
-    state.target = element.scrollHeight
+    const computed = window.getComputedStyle(element)
+    const lineHeight = Number.parseFloat(computed.lineHeight)
+    const height = Number.isFinite(lineHeight) && lineHeight > 0 ? lineHeight : 22
+    element.style.setProperty('--dsh-uix-tilt', tiltFor(element, height))
+    state.target = terminal(element, height)
     const gap = state.target - state.shown
     if (gap < MIN_REVEAL_PX) {
-      // Close enough: show everything and drop the mask so the text is plain again.
       element.style.setProperty('--dsh-uix-reveal', `${state.target}px`)
       state.shown = state.target
       return
     }
-    const duration = revealDuration(gap, active.durationScale)
-    element.style.setProperty('--dsh-uix-ease', easedCurve)
     // The duration differs per chunk, so it cannot live in the sheet: a transition
     // declared there would apply the same duration to every arrival.
-    element.style.transition = `--dsh-uix-reveal ${duration}ms ${easedCurve}`
+    element.style.transition = `--dsh-uix-reveal ${revealDuration(gap, active.durationScale)}ms ${ease}`
     element.style.setProperty('--dsh-uix-reveal', `${state.target}px`)
     state.shown = state.target
   }
 
   /**
-   * Roll the previous summary line out as the new one arrives.
-   * @param element - the summary element.
+   * Roll a live label: the line it showed before this update leaves upward while
+   * the new one arrives from below.
+   * @param element - the label.
    * @param previous - the text it showed before this update.
    */
   function roll(element: ElementLike, previous: string): void {
-    if (previous.trim() === '' || previous === element.textContent) return
-    element.setAttribute('data-dsh-uix-prev', previous)
-    // Restart the animation even when it is already running: two chunks inside one
+    const before = previous.replace(/\s+/g, ' ').trim()
+    const now = (element.textContent ?? '').replace(/\s+/g, ' ').trim()
+    if (before === '' || before === now) return
+    element.setAttribute('data-dsh-uix-prev', before)
+    // Restart the animation even when it is already running: two updates inside one
     // roll must not leave the second one unanimated.
     element.removeAttribute('data-dsh-uix-rolling')
     void element.scrollHeight
@@ -284,10 +345,10 @@ export function createStreamMotion(): {
   /**
    * Drop every mark this layer put on one element and hand it back untouched.
    *
-   * The reveal is first moved one line past the content, which is the position at
-   * which the mask paints everything: removing it outright would snap the faded
-   * last line to full colour in one frame. The transition carries that last step,
-   * and only then does the mask go away.
+   * The reveal is first moved past the content, which is the position at which the
+   * mask paints everything: removing it outright would snap the faded last line to
+   * full colour in one frame. The transition carries that last step, and only then
+   * does the mask go away.
    *
    * @param element - the element to release.
    * @param immediately - skip the settling step, for teardown.
@@ -296,51 +357,34 @@ export function createStreamMotion(): {
     const state = reveals.get(element)
     reveals.delete(element)
     element.removeAttribute(STREAM_ATTRIBUTE)
-    element.removeAttribute('data-dsh-uix-last')
+    element.removeAttribute(LAST_ATTRIBUTE)
     element.removeAttribute('data-dsh-uix-prev')
     element.removeAttribute('data-dsh-uix-rolling')
-    if (immediately || state === undefined) {
+    const clear = (): void => {
       element.style.removeProperty('--dsh-uix-reveal')
-      element.style.removeProperty('--dsh-uix-ease')
+      element.style.removeProperty('--dsh-uix-tilt')
       element.style.removeProperty('transition')
+    }
+    if (immediately || state === undefined) {
+      clear()
       return
     }
-    // Paint the remainder, then drop the mask once that transition is over.
     element.style.setProperty('--dsh-uix-reveal', `${state.target + element.scrollHeight}px`)
-    window.setTimeout(() => {
-      element.style.removeProperty('--dsh-uix-reveal')
-      element.style.removeProperty('--dsh-uix-ease')
-      element.style.removeProperty('transition')
-    }, MAX_REVEAL_MS)
+    window.setTimeout(clear, MAX_REVEAL_MS)
   }
 
-  /** Re-measure every streaming element that is currently on screen. */
+  /** Re-measure every live element that still exists. */
   function measure(): void {
     pending = false
     const active = settings
     if (active === undefined || active.mode === 'off' || still()) return
     const marked = document.querySelectorAll(`[${STREAM_ATTRIBUTE}]`)
-    const live = new Set<ElementLike>()
     for (let index = 0; index < marked.length; index += 1) {
       const element = marked[index]
       if (element === undefined) continue
-      live.add(element)
-    }
-    // Elements that stopped streaming are finished: show them whole and stop
-    // paying for them.
-    for (const [element] of reveals) {
-      if (!live.has(element)) forget(element)
-    }
-    for (const element of live) {
-      let state = reveals.get(element)
-      if (state === undefined) {
-        // An element first seen mid-stream already shows whatever arrived before
-        // this layer started watching; revealing that from zero would blank a
-        // message the reader is looking at.
-        const current = element.scrollHeight
-        state = { shown: current, target: current, frame: 0 }
-        reveals.set(element, state)
-      }
+      if (element.getAttribute(STREAM_ATTRIBUTE) !== 'reveal') continue
+      const state = reveals.get(element)
+      if (state === undefined) continue
       advance(element, state)
     }
   }
@@ -353,45 +397,68 @@ export function createStreamMotion(): {
   }
 
   /**
-   * Mark newly streaming elements, and give the ones that stopped their text back.
+   * Whether this label is already covered by an ancestor this layer marks.
    *
-   * This runs on every mutation batch, so it does the cheapest possible thing:
-   * a single selector query, and a write only for elements whose state changed.
+   * The reasoning summary is a `nowrap` element that contains a `TextShimmer`, so
+   * both are live: marking each would animate the same line twice.
+   *
+   * @param element - the candidate.
+   * @returns whether an ancestor is already marked.
+   */
+  function covered(element: ElementLike): boolean {
+    let node = element.parentElement
+    while (node !== null) {
+      if (node.hasAttribute(STREAM_ATTRIBUTE)) return true
+      node = node.parentElement
+    }
+    return false
+  }
+
+  /**
+   * Mark newly live elements and release the ones that stopped.
+   *
+   * This runs on every mutation batch, so it does the cheapest thing that works: a
+   * single selector query, and a write only where the state actually changed.
    */
   function mark(): void {
     const active = settings
     if (active === undefined || active.mode === 'off' || still()) return
-    const streaming = document.querySelectorAll(STREAMING)
-    const live = new Set<ElementLike>()
-    for (let index = 0; index < streaming.length; index += 1) {
-      const element = streaming[index]
-      if (element === undefined) continue
-      live.add(element)
-      const mode = isSummary(element) ? 'roll' : 'reveal'
-      if (element.getAttribute(STREAM_ATTRIBUTE) !== mode) {
+    const live = document.querySelectorAll(LIVE)
+    const seen = new Set<ElementLike>()
+    for (let index = 0; index < live.length; index += 1) {
+      const element = live[index]
+      if (element === undefined || covered(element)) continue
+      seen.add(element)
+      const mode = isLabel(element) ? 'roll' : 'reveal'
+      const marked = element.getAttribute(STREAM_ATTRIBUTE)
+      if (marked !== mode) {
+        if (marked !== null) forget(element, true)
         if (mode === 'roll') {
-          roll(element, element.getAttribute('data-dsh-uix-last') ?? '')
-          element.style.removeProperty('--dsh-uix-reveal')
-          element.style.removeProperty('--dsh-uix-ease')
-          reveals.delete(element)
+          // A label starts by showing what it currently says; only the next change
+          // has a previous line to roll out.
+          element.setAttribute(LAST_ATTRIBUTE, (element.textContent ?? '').replace(/\s+/g, ' ').trim())
+        } else {
+          // A body first seen mid-stream already shows what arrived before this
+          // layer started watching; revealing that from zero would blank a message
+          // the reader is looking at.
+          const height = element.scrollHeight
+          reveals.set(element, { shown: height, target: height })
         }
         element.setAttribute(STREAM_ATTRIBUTE, mode)
       }
-      // Remember the line so the next completion can roll it out.
-      const text = element.textContent ?? ''
-      if (element.getAttribute('data-dsh-uix-last') !== text) {
-        if (element.getAttribute(STREAM_ATTRIBUTE) === 'roll') {
-          roll(element, element.getAttribute('data-dsh-uix-last') ?? '')
-        }
-        element.setAttribute('data-dsh-uix-last', text)
+      if (mode !== 'roll') continue
+      const text = (element.textContent ?? '').replace(/\s+/g, ' ').trim()
+      const previous = element.getAttribute(LAST_ATTRIBUTE) ?? ''
+      if (previous !== text) {
+        roll(element, previous)
+        element.setAttribute(LAST_ATTRIBUTE, text)
       }
     }
-    // A message that finished streaming lost its `data-streaming` attribute, so it
-    // is no longer in `live`; its mask has to come off or the last line stays faded.
+    // Anything still marked but no longer live has finished.
     const marked = document.querySelectorAll(`[${STREAM_ATTRIBUTE}]`)
     for (let index = 0; index < marked.length; index += 1) {
       const element = marked[index]
-      if (element === undefined || live.has(element)) continue
+      if (element === undefined || seen.has(element)) continue
       forget(element)
     }
     schedule()
@@ -410,7 +477,7 @@ export function createStreamMotion(): {
       subtree: true,
       characterData: true,
       attributes: true,
-      attributeFilter: ['data-streaming'],
+      attributeFilter: ['data-streaming', 'data-shimmer'],
     })
     mark()
   }
@@ -425,10 +492,8 @@ export function createStreamMotion(): {
     const marked = document.querySelectorAll(`[${STREAM_ATTRIBUTE}]`)
     for (let index = 0; index < marked.length; index += 1) {
       const element = marked[index]
-      if (element === undefined) continue
-      forget(element, true)
+      if (element !== undefined) forget(element, true)
     }
-    for (const [element] of reveals) forget(element, true)
     reveals.clear()
   }
 
@@ -438,7 +503,7 @@ export function createStreamMotion(): {
       settings = next
       if (next.mode === 'off' || !next.stream) return
       if (next.reduced === 'system' && window.matchMedia('(prefers-reduced-motion: reduce)').matches) return
-      easedCurve = `cubic-bezier(0.34, 0.8, 0.34, 1)`
+      ease = 'cubic-bezier(0.34, 0.8, 0.34, 1)'
       install()
     },
     restore: uninstall,
