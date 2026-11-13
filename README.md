@@ -20,8 +20,18 @@ pnpm typecheck
 pnpm build
 ```
 
-源码在 `src/`（`index.ts` 为宿主半，`client.ts` 为浏览器半，`shared.ts` 为两端共享的协议类型），esbuild 产物输出到 `lib/`（不入库）。
+源码在 `src/`（`index.ts` 为宿主半，`client.ts` 为浏览器半，`shared.ts` 为两端共享的协议类型），esbuild 产物输出到 `lib/`。`lib/` 会提交入库，以便其他设备直接从 git 安装而无需构建环境；改动源码后务必重新构建并一并提交产物。
 
 ## 安装
 
-作为 profile 依赖以 `link:` 方式引入，详见 [docs/DETAIL.md](docs/DETAIL.md)。
+本机开发时作为 profile 依赖以 `link:` 方式引入（详见 [docs/DETAIL.md](docs/DETAIL.md)）。
+
+其他设备从 git 安装时，在 profile 的 `package.json` 依赖中**必须写显式别名**，否则 pnpm 会从 SSH 地址中取出错误的包名（如 `git`）：
+
+```json
+{
+  "dependencies": {
+    "@local/dsh-ui-experience": "git+ssh://git@git.mclans.ink:10022/projectai/dsh-ui-experience.git"
+  }
+}
+```
