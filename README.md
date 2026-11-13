@@ -29,12 +29,13 @@ pnpm build
 其他设备通过「插件管理器 → 添加插件 → 安装第三方插件」安装，粘贴 Git 仓库地址：
 
 ```
-git+ssh://git@git.mclans.ink:10022/projectai/dsh-ui-experience.git
+git+https://github.com/dsh-plugins/dsh-ui-experience.git
 ```
 
 注意：
 
-- 地址必须以 `git+ssh://` 开头；裸 `ssh://` 不会被识别为 Git 仓库。
-- 目标设备需要能访问该仓库（SSH 密钥已配置）。
+- 地址必须以 `git+` 开头；裸 `https://` 不会被识别为 Git 仓库。
+- 目标设备需要能访问该仓库。
 - 构建产物 `lib/` 已入库，无需在目标设备上构建；安装后按提示重启 DSH。
-- 不要手动编辑 profile 的 `package.json`：缺少别名时 pnpm 会从 SSH 地址中取出错误的包名（如 `git`），导致模块解析失败。
+- 不要手动编辑 profile 的 `package.json`：包名以仓库 `package.json` 的 `name` 为准（`@dsh-plugin/dsh-ui-experience`），别名与仓库名不一致时需显式声明。
+

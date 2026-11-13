@@ -1,9 +1,18 @@
 {
-  "name": "@local/dsh-ui-experience",
+  "name": "@dsh-plugin/dsh-ui-experience",
   "version": "1.0.0",
   "private": true,
   "type": "module",
   "description": "UI experience enhancements for DeepSeek Harness: follow the system matugen Material You palette as the interface theme.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/dsh-plugins/dsh-ui-experience.git"
+  },
+  "homepage": "https://github.com/dsh-plugins/dsh-ui-experience",
+  "bugs": {
+    "url": "https://github.com/dsh-plugins/dsh-ui-experience/issues"
+  },
   "main": "lib/index.js",
   "exports": {
     ".": "./lib/index.js",
@@ -38,6 +47,9 @@
         "@deepseek-ai/dsh-client-ui-theme"
       ]
     }
+  },
+  "engines": {
+    "dsh": ">=0.2.0-0"
   },
   "devDependencies": {
     "@deepseek-ai/dsh-typert-protocol": "0.2.2-rc.2",

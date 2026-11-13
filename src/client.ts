@@ -86,7 +86,7 @@ declare const document: {
   createElement(tag: 'style'): { textContent: string; remove(): void }
 }
 
-const SOURCE = '@local/dsh-ui-experience'
+const SOURCE = '@dsh-plugin/dsh-ui-experience'
 const POLL_MS = 2000
 
 /** Wire codec metadata carried on every Remote value. */
