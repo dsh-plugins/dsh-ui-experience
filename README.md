@@ -194,9 +194,27 @@ M3 那侧的分离要说明白：Material 3 的 `emphasized` 整体是两段首�
 - `ctrl` / `meta`（缩放）与非像素单位（`line` / `page`）不接管。
 - 容器已经到边界时，夹紧后的落点等于当前位置，不接管，让浏览器照常处理链式滚动（`overscroll-behavior`）。
 
-接管后用指数衰减（每帧走完剩余距离的 22%）而不是固定时长：滚轮是一串方向增量，固定时长会在每一格重新开始。滚轮增量累加到同一个目标上，所以快速连续滚动会平滑接续；任一读者按键、触摸，或本层的程序滚动启动，都会立刻终止滚轮缓动。
+接管后走与其他滚动相同的曲线族与时长模型：每一格从**当前实际位置**起算到累积目标，时长按这段距离算，曲线取当前设置的效果曲线。这与 Chromium 自身的 `UpdateTarget` 语义一致——重新瞄准，而不是把曲线从已经被走过的起点重新播一遍——所以连续滚动时位置连续、不会跳回。
 
-实测单次 120px 滚动分 15 帧落位，连续六格（360px）分 25 帧落位。
+实测同一段 300px：`M3` 在 40ms 时走到 120px，`M3E` 走到 139px，形状随曲线族变化。任一读者按键、触摸，或本层的程序滚动启动，都会立刻终止滚轮缓动。
+
+#### 为什么必须自己接管：浏览器把滚轮曲线写死在编译期
+
+`scroll-behavior` 规范上就不管用户滚动——CSSOM View 原文是「导航、CSSOM 滚动 API、非用户发起的 scroll snapping 之外的其他滚动，例如用户执行的滚动，不受该属性影响」。
+
+Chromium 内部确实有滚轮滚动动画，但曲线是源码常量（`cc/animation/scroll_offset_animation_curve.cc`）：
+
+```cpp
+static constexpr CubicBezierPoints kEaseInOutControlPoints{
+    .x1 = 0.42, .y1 = 0, .x2 = 0.58, .y2 = 1,   // 就是 CSS 的 ease-in-out
+};
+CubicBezierPoints control_points = kEaseInOutControlPoints;
+if (scroll_type_ == ScrollType::kProgrammatic) {
+  control_points = GetCubicBezierPointsForProgrammaticScroll();   // 仅程序化滚动可被 feature flag 覆盖
+}
+```
+
+用户滚轮走 `kEaseInOutControlPoints`，**连命令行参数都改不了**；能被 `--enable-features` 覆盖的只有程序化滚动那条分支。时长同样是常量算法（`kInverseDelta`，120–480px 映射到 100–200ms，`kDurationDivisor = 60`）。CSS 与 JS 都读不到这些值，也无法覆盖。
 
 #### 固定的两条规则
 

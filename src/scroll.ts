@@ -137,13 +137,25 @@ interface WheelLike extends EventLike {
   preventDefault(): void
 }
 
-/** A wheel stream being eased toward its accumulated target. */
+/**
+ * A wheel stream. Each notch re-aims one segment from where the viewport is to
+ * the accumulated target, the way Chromium's own `UpdateTarget` does: the curve
+ * restarts from the current position, so the velocity stays continuous instead
+ * of jumping back to the curve's start.
+ */
 interface WheelRun {
   readonly element: ElementLike
+  /** Accumulated target, clamped to the container's range. */
   top: number
   left: number
-  frame: number
+  /** Where the current segment began. */
+  fromTop: number
+  fromLeft: number
+  /** Timestamp the current segment began, for its progress. */
   started: number
+  /** Duration of the current segment. */
+  duration: number
+  frame: number
 }
 
 /** The native `scrollTop` / `scrollLeft` accessors, captured before patching. */
@@ -208,13 +220,6 @@ const TAKEOVER_EVENTS = ['wheel', 'touchstart', 'keydown'] as const
  * animating those would leave the viewport chasing its own content.
  */
 const JUMP_ANIMATE_MIN = 24
-
-/**
- * Fraction of the remaining wheel distance covered per frame. Exponential decay
- * rather than a curve: a wheel arrives as a stream of directions, and a fixed
- * duration would restart on every notch.
- */
-const WHEEL_DECAY = 0.22
 
 /** Wheel travel below this lands immediately, so the stream can end. */
 const WHEEL_SETTLE_PX = 0.5
@@ -555,20 +560,17 @@ export function createScrollMotion(): {
     const active = wheel
     if (active === undefined) return
     const element = active.element
-    const max = maxima(element)
-    const top = element.scrollTop
-    const left = element.scrollLeft
-    const gapTop = Math.min(max.top, Math.max(0, active.top)) - top
-    const gapLeft = Math.min(max.left, Math.max(0, active.left)) - left
-    const remaining = Math.max(Math.abs(gapTop), Math.abs(gapLeft))
-    const expired = now - active.started > WHEEL_MAX_MS
-    if (remaining <= WHEEL_SETTLE_PX || expired) {
+    const progress = active.duration <= 0 ? 1 : Math.min(1, (now - active.started) / active.duration)
+    const eased = easeCurve(effectCurvePoints((settings as MotionSettings).mode), progress)
+    if (progress >= 1) {
+      writeAxis(element, 'top', active.top)
+      writeAxis(element, 'left', active.left)
       wheel = undefined
       release(element, true)
       return
     }
-    writeAxis(element, 'top', top + gapTop * WHEEL_DECAY)
-    writeAxis(element, 'left', left + gapLeft * WHEEL_DECAY)
+    writeAxis(element, 'top', active.fromTop + (active.top - active.fromTop) * eased)
+    writeAxis(element, 'left', active.fromLeft + (active.left - active.fromLeft) * eased)
     active.frame = window.requestAnimationFrame(wheelStep)
   }
 
@@ -613,15 +615,24 @@ export function createScrollMotion(): {
       for (const leg of stopped.legs) release(leg.element, true)
       for (const settle of stopped.done) settle()
     }
-    const streaming = base !== undefined
-    if (!streaming) {
-      hold(element)
-      wheel = { element, top, left, frame: 0, started: performance.now() }
-    } else {
-      wheel = { ...base, top, left }
+    if (base === undefined) hold(element)
+    else window.cancelAnimationFrame(base.frame)
+    // The segment starts from where the viewport stands now, so a burst of notches
+    // keeps the position continuous; each notch re-aims the curve rather than
+    // restarting it from an origin the viewport already left behind.
+    const travelled = Math.max(Math.abs(top - fromTop), Math.abs(left - fromLeft))
+    const segment: WheelRun = {
+      element,
+      top,
+      left,
+      fromTop,
+      fromLeft,
+      started: performance.now(),
+      duration: Math.min(WHEEL_MAX_MS, scrollDurationMs(travelled, active)),
+      frame: 0,
     }
-    window.cancelAnimationFrame(wheel.frame)
-    wheel.frame = window.requestAnimationFrame(wheelStep)
+    wheel = segment
+    segment.frame = window.requestAnimationFrame(wheelStep)
     return true
   }
 
