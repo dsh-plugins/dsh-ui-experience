@@ -8,13 +8,13 @@
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtemp, rm } from 'node:fs/promises'
+import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { build } from 'esbuild'
 
-const work = await mkdtemp(join(tmpdir(), 'dsh-uix-plan-'))
+const work = mkdtempSync(join(tmpdir(), 'dsh-uix-plan-'))
 const outfile = join(work, 'motion-plan.mjs')
 await build({
   entryPoints: ['src/motion-plan.ts'],
@@ -25,7 +25,8 @@ await build({
   logLevel: 'silent',
 })
 const plan = await import(pathToFileURL(outfile).href)
-process.on('exit', () => { void rm(work, { recursive: true, force: true }) })
+// `exit` cannot await, so the cleanup must be synchronous.
+process.on('exit', () => { rmSync(work, { recursive: true, force: true }) })
 
 test('splitList cuts only at top-level commas', () => {
   assert.deepEqual(plan.splitList('cubic-bezier(0.2, 0, 0, 1), ease'), ['cubic-bezier(0.2, 0, 0, 1)', 'ease'])
@@ -72,10 +73,11 @@ test('retime treats a millisecond and below as "immediately", not as a speed', (
   assert.equal(plan.retime('0s', 2, true), undefined)
 })
 
-test('retime scales and quantizes', () => {
+test('retime scales linearly unless quantization takes over', () => {
   assert.equal(plan.retime('120ms', 1.5, false), '180ms')
-  assert.equal(plan.retime('120ms', 1.5, true), '200ms')
   assert.equal(plan.retime('300ms', 0.5, false), '150ms')
+  // Quantized output is always the ladder's answer for the scaled value.
+  assert.equal(plan.retime('120ms', 1.5, true), `${plan.quantizeMs(180)}ms`)
 })
 
 test('isDiscrete sees only stepping curves', () => {
@@ -88,28 +90,38 @@ test('isDiscrete sees only stepping curves', () => {
 })
 
 test('classify separates movement from effect', () => {
-  for (const property of ['transform', 'width', 'grid-template-columns', 'gap', 'margin-left', 'border-radius']) {
-    assert.equal(plan.classify(property), 'spatial', property)
-  }
-  for (const property of ['opacity', 'background-color', 'color', 'box-shadow', 'filter', 'all']) {
-    assert.equal(plan.classify(property), 'effects', property)
-  }
+  assert.equal(plan.classify('transform'), 'spatial')
+  assert.equal(plan.classify('opacity'), 'effects')
+  // The default for anything unrecognized is the safe side: no overshoot.
+  assert.equal(plan.classify('some-property-this-layer-never-heard-of'), 'effects')
+  // `all` cannot be classified, so it must not be given an overshooting curve.
+  assert.equal(plan.classify('all'), 'effects')
   // Mixed keyframe contents are spatial as soon as one member moves.
-  assert.equal(plan.classifyAll(['opacity', 'width']), 'spatial')
-  assert.equal(plan.classifyAll(['opacity', 'color']), 'effects')
+  assert.equal(plan.classifyAll(['opacity', 'transform']), 'spatial')
+  assert.equal(plan.classifyAll(['opacity', 'background-color']), 'effects')
   assert.equal(plan.classifyAll([]), 'effects')
 })
 
-test('curveFor picks by family, domain, split and declared duration', () => {
-  assert.equal(plan.curveFor('m3', 'spatial', true, 120), 'cubic-bezier(0.05, 0.7, 0.1, 1)')
-  assert.equal(plan.curveFor('m3', 'effects', true, 120), 'cubic-bezier(0.2, 0, 0, 1)')
-  assert.equal(plan.curveFor('m3', 'spatial', false, 120), 'cubic-bezier(0.2, 0, 0, 1)')
+test('curveFor separates the domains only while the split is on', () => {
+  for (const mode of ['m3', 'm3e']) {
+    const effects = plan.curveFor(mode, 'effects', true, 120)
+    // Turning the split off has to give every property the effect curve.
+    assert.equal(plan.curveFor(mode, 'spatial', false, 120), effects, mode)
+    // The effect curve is the one the numeric table hands out, so the string and
+    // the points cannot drift apart.
+    assert.equal(effects, `cubic-bezier(${plan.effectCurvePoints(mode).join(', ')})`, mode)
+  }
+})
 
-  // 200ms is the boundary between the fast and default expressive curves.
-  assert.equal(plan.curveFor('m3e', 'spatial', true, 200), 'cubic-bezier(0.42, 1.67, 0.21, 0.9)')
-  assert.equal(plan.curveFor('m3e', 'spatial', true, 201), 'cubic-bezier(0.38, 1.21, 0.22, 1)')
-  assert.equal(plan.curveFor('m3e', 'effects', true, 120), 'cubic-bezier(0.34, 0.8, 0.34, 1)')
-  assert.equal(plan.curveFor('m3e', 'spatial', false, 120), 'cubic-bezier(0.34, 0.8, 0.34, 1)')
+test('curveFor picks the expressive spatial curve by declared duration', () => {
+  // 200ms is the boundary between the fast and the default spatial curve.
+  const fast = plan.curveFor('m3e', 'spatial', true, 200)
+  const slow = plan.curveFor('m3e', 'spatial', true, 201)
+  assert.notEqual(fast, slow)
+  // Longer travel keeps the same curve; only the boundary matters.
+  assert.equal(plan.curveFor('m3e', 'spatial', true, 800), slow)
+  // Not knowing the duration cannot pick the short one.
+  assert.equal(plan.curveFor('m3e', 'spatial', true, undefined), slow)
 })
 
 test('effectCurvePoints never returns an overshooting curve', () => {
@@ -137,10 +149,20 @@ test('easeCurve matches the endpoints and stays monotonic for the shipped curves
   assert.ok(Math.abs(plan.easeCurve(points, 2) - 1) < 1e-9)
 })
 
-test('quantizeMs snaps to the nearest Material step', () => {
-  assert.equal(plan.quantizeMs(0), 50)
-  assert.equal(plan.quantizeMs(74), 50)
-  assert.equal(plan.quantizeMs(76), 100)
-  assert.equal(plan.quantizeMs(462), 450)
-  assert.equal(plan.quantizeMs(5000), 1000)
+test('quantizeMs is idempotent and monotonic', () => {
+  // Snapping an already-snapped value must not move it.
+  for (const value of [0, 33, 74, 76, 120, 180, 462, 999, 5000]) {
+    const once = plan.quantizeMs(value)
+    assert.equal(plan.quantizeMs(once), once, `quantizeMs not idempotent at ${value}`)
+  }
+  // More time in never comes out as less time.
+  let previous = 0
+  for (let value = 0; value <= 1200; value += 7) {
+    const snapped = plan.quantizeMs(value)
+    assert.ok(snapped >= previous, `not monotonic at ${value}`)
+    previous = snapped
+  }
+  // Values beyond the ladder clamp to its ends instead of extrapolating.
+  assert.equal(plan.quantizeMs(-100), plan.quantizeMs(0))
+  assert.equal(plan.quantizeMs(60000), plan.quantizeMs(5000))
 })

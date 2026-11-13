@@ -110,9 +110,10 @@ const GROWTH_MS_PER_PX = 0.2
 
 /**
  * Slack for comparing two positions that both came back from the browser. They
- * are already quantized to its pixel grid (measured: assigning 1234.5 reads back
- * 1235 at dpr 1, 0.6666 at dpr 1.5), so this only absorbs a fractional device
- * pixel at dpr 2, where the grid step is 0.5.
+ * are already snapped to its pixel grid: a whole pixel at dpr 1, a 2/3 step at
+ * dpr 1.5, half a pixel at dpr 2. This only absorbs the finest of those, so a
+ * genuine half-pixel move on a dpr 2 display reads as no movement — accepted,
+ * because it is not visible.
  */
 const MOTION_EPSILON = 0.5
 
@@ -125,11 +126,19 @@ const SCROLL_KEYS = new Set([
   'PageUp', 'PageDown', 'Home', 'End', ' ',
 ])
 
-/** Fields where those keys edit text instead of scrolling. A checkbox or a
- *  button is an `input` too, but a scroll key over one still scrolls the page. */
+/**
+ * Fields where those keys edit text instead of scrolling.
+ *
+ * Every exclusion is part of the same compound selector, so all of them apply to
+ * `input` alone. Split across two comma-separated entries, the second one would
+ * be a bare `:not(...)` — a compound selector in its own right — and would match
+ * every element on the page, turning the whole keyboard cancellation path off.
+ * A checkbox or a button is an `input` too, but a scroll key over one still
+ * scrolls the page, so those types stay out of the list.
+ */
 const EDITABLE = [
-  'input:not([type=checkbox]):not([type=radio]):not([type=button])',
-  ':not([type=submit]):not([type=reset]):not([type=file]):not([type=range])',
+  'input:not([type=checkbox]):not([type=radio]):not([type=button])'
+    + ':not([type=submit]):not([type=reset]):not([type=file]):not([type=range])',
   'textarea', 'select',
   '[contenteditable=""]', '[contenteditable="true"]', '[contenteditable="plaintext-only"]',
 ].join(', ')
@@ -239,9 +248,10 @@ export function createScrollMotion(): {
     const elapsed = now - active.started
     const progress = active.duration <= 0 ? 1 : Math.min(1, elapsed / active.duration)
     const eased = easeCurve(effectCurvePoints((settings as MotionSettings).mode), progress)
-    // Check every leg before writing any of them: writing an inner container can
-    // move an ancestor through scroll anchoring, and a check interleaved with the
-    // writes would read that as the reader having taken over.
+    // Verify every leg before writing any of them, so no leg is judged against a
+    // position this same frame just changed. Writing one container does not move
+    // another synchronously, but keeping the check ahead of the writes makes that
+    // independence an invariant of the loop rather than a property of the browser.
     for (let index = 0; index < active.legs.length; index += 1) {
       const leg = active.legs[index]
       const written = active.written[index]
@@ -345,7 +355,9 @@ export function createScrollMotion(): {
       if (!moved) continue
       legs.push({ element, fromTop: origin.top, fromLeft: origin.left, toTop: landed.top, toLeft: landed.left })
     }
-    if (legs.length === 0) return undefined
+    // The native call resolves even when nothing moved, so `await` never sees a
+    // different contract here than it does without this layer.
+    if (legs.length === 0) return Promise.resolve()
     return new Promise<void>(resolve => { start(legs, resolve) })
   }
 
