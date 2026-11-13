@@ -134,7 +134,9 @@ token 的值按原样写入 CSS 变量，因此 `color-mix(...)` 这类表达式
 | --- | --- |
 | `.dsh-uix-row` | `AppearanceRow.module.css` `.group` |
 | `.dsh-uix-title` / `.dsh-uix-desc` | `FontSizeRow.module.css` `.title` / `.desc` |
-| `.dsh-uix-field` / `-label` / `-input` | `ConfigField.module.css` `.field` / `.head label` / `.field input` |
+| `.dsh-uix-field` / `-label` | `ConfigField.module.css` `.field` / `.head label` |
+| `.dsh-uix-input-wrap` / `-input` | `Input.module.css` `.wrap` / `.input`（同页字体字段用的就是这个原语） |
+| `.dsh-uix-disclosure` / `-icon` | `FontSizeRow.module.css` `.expander`，箭头复用其 chevron 路径 |
 | `.dsh-uix-save` | 配置表单的保存按钮 |
 | `.dsh-uix-reset` | `Button.module.css` `.outline` |
 | `.dsh-uix-switch` / `-thumb` | `Switch.module.css` `.switch` / `.thumb` |

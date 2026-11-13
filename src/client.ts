@@ -540,14 +540,17 @@ function registerClient(): void {
           ): unknown =>
             h('label', { className: 'dsh-uix-field' },
               h('span', { className: 'dsh-uix-label' }, label),
-              h('input', {
-                className: 'dsh-uix-input',
-                type: 'text',
-                value,
-                placeholder,
-                spellCheck: false,
-                onChange: (event: { target: { value: string } }) => { set(event.target.value) },
-              }),
+              h('span', { className: 'dsh-uix-input-wrap' },
+                h('input', {
+                  className: 'dsh-uix-input',
+                  type: 'text',
+                  value,
+                  placeholder,
+                  spellCheck: false,
+                  autoComplete: 'off',
+                  onChange: (event: { target: { value: string } }) => { set(event.target.value) },
+                }),
+              ),
               hint ?? null,
             )
 
@@ -595,7 +598,19 @@ function registerClient(): void {
               className: 'dsh-uix-disclosure',
               'aria-expanded': open,
               onClick: () => { setOpen(!open) },
-            }, `${open ? '▾' : '▸'} ${tr('palette.paths')}`),
+            },
+            h('span', { className: 'dsh-uix-disclosure-icon' },
+              h('svg', {
+                viewBox: '0 0 16 16',
+                width: 14,
+                height: 14,
+                fill: 'none',
+                stroke: 'currentColor',
+                strokeWidth: 1,
+                'aria-hidden': true,
+              }, h('path', { d: 'M4 6L7.29289 9.29289C7.68342 9.68342 8.31658 9.68342 8.70711 9.29289L12 6' })),
+            ),
+            h('span', null, tr('palette.paths'))),
             editor,
           )
         }

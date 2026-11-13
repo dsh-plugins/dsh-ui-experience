@@ -37,10 +37,15 @@ export const ROW_CSS = `
 
 /* Disclosure target: sized like the field label it introduces, with the
    shared hover wash and focus ring instead of a colour-only affordance. */
-.dsh-uix-disclosure{align-self:flex-start;padding:2px 6px 2px 0;border:0;border-radius:var(--dsw-radius-sm);background:transparent;color:var(--dsw-alias-label-secondary);font:inherit;font-size:12px;line-height:1.5;cursor:pointer}
-.dsh-uix-disclosure:hover{background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-primary)}
-.dsh-uix-disclosure:active{background:var(--dsw-alias-interactive-bg-active)}
-.dsh-uix-disclosure:focus-visible{outline:var(--dsw-focus-ring-width) solid var(--dsw-alias-state-business-primary);outline-offset:2px}
+/* Disclosure: FontSizeRow.module.css .expander — a 24px icon button whose
+   chevron rotates 180deg while expanded, beside the label text. */
+.dsh-uix-disclosure{display:inline-flex;align-items:center;gap:4px;align-self:flex-start;margin-top:4px;padding:0;border:0;background:transparent;color:var(--dsw-alias-label-tertiary);font:inherit;font-size:12px;line-height:1.5;cursor:pointer}
+.dsh-uix-disclosure:hover{color:var(--dsw-alias-label-secondary)}
+.dsh-uix-disclosure:focus-visible{outline:var(--dsw-focus-ring-width) solid var(--dsw-alias-state-business-primary);outline-offset:2px;border-radius:var(--dsw-radius-xs)}
+.dsh-uix-disclosure-icon{display:inline-flex;align-items:center;justify-content:center;width:24px;height:24px;border-radius:var(--dsw-radius-xs)}
+.dsh-uix-disclosure:hover .dsh-uix-disclosure-icon{background:var(--dsw-alias-interactive-bg-hover)}
+.dsh-uix-disclosure-icon svg{transition:transform 150ms ease}
+.dsh-uix-disclosure[aria-expanded=true] .dsh-uix-disclosure-icon svg{transform:rotate(180deg)}
 
 /* Path fields: ConfigField.module.css .field, .field + .field, .head label,
    and .field input. The input is sized by padding, not a fixed height. */
@@ -48,9 +53,13 @@ export const ROW_CSS = `
 .dsh-uix-field{display:flex;flex-direction:column;gap:6px;padding:12px 0}
 .dsh-uix-field+.dsh-uix-field{border-top:0.5px solid var(--dsw-alias-border-l2)}
 .dsh-uix-label{font-size:13px;font-weight:500;line-height:1.5;color:var(--dsw-alias-label-primary)}
-.dsh-uix-input{padding:6px 12px;border:0.5px solid var(--dsw-alias-border-l4);border-radius:var(--dsw-radius-md);background:var(--dsw-alias-bg-layer-3);color:var(--dsw-alias-label-primary);font:inherit}
-.dsh-uix-input::placeholder{color:var(--dsw-alias-label-tertiary)}
-.dsh-uix-input:focus-visible{outline:none;border-color:var(--dsw-alias-state-business-primary)}
+/* Input primitive: Input.module.css .wrap / .input / placeholder — the
+   wrapper owns the 32px box and the border, the inner input is transparent.
+   The same page's font-family fields render through this primitive. */
+.dsh-uix-input-wrap{display:inline-flex;align-items:center;gap:6px;box-sizing:border-box;width:100%;height:32px;padding:0 8px;border:0.5px solid var(--dsw-alias-border-l4);border-radius:var(--dsw-radius-md);background:var(--dsw-alias-bg-layer-1)}
+.dsh-uix-input-wrap:focus-within{border-color:var(--dsw-alias-state-business-primary)}
+.dsh-uix-input{flex:1;min-width:0;border:none;outline:none;background:transparent;font:inherit;font-size:14px;line-height:22px;color:var(--dsw-alias-label-primary)}
+.dsh-uix-input::placeholder{color:var(--dsw-alias-label-dimmed)}
 .dsh-uix-hint{margin:0;font-size:12px;line-height:1.5;color:var(--dsw-alias-label-tertiary)}
 
 /* Form footer and its save action: the configuration form's footer and save
