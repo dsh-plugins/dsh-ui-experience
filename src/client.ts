@@ -14,6 +14,7 @@ import {
   type PalettePaths, type PollArgs, type PollResult, type SetActiveArgs, type SetActiveResult,
   type SetPathsArgs, type SetPathsResult, type ThemeTokenModes,
 } from './shared.ts'
+import { ROW_CSS } from './styles.ts'
 
 /** Minimal React face the bundle uses (the real React arrives from the loader). */
 interface ReactLike {
@@ -197,53 +198,6 @@ const DICTS: Record<string, Record<string, string>> = {
   },
 }
 
-/**
- * Row styles. Values are taken from the host controls this row sits beside:
- * the settings row chrome (`AppearanceRow.module.css` — 16/0 padding, hairline
- * separator, 14/22 title), the configuration-form field and its save button
- * (`_field_181ew_*`, `_footer_ft7vz_*`, `_save_ft7vz_*`), the `sm` outline
- * button (`_sm_1ulci_28`, `_outline_1ulci_56`), and the `Switch` control
- * (`_switch_1ik0f_*`). Every value is a theme token, so the row follows both the
- * built-in palettes and the matugen overlay.
- */
-const CSS = `
-.dsh-uix-row{display:flex;flex-direction:column;gap:8px;padding:16px 0;border-bottom:.5px solid var(--dsw-alias-border-l2)}
-.dsh-uix-head{display:flex;align-items:center;justify-content:space-between;gap:24px}
-.dsh-uix-text{display:flex;flex-direction:column;gap:4px;min-width:0}
-.dsh-uix-title{font-size:14px;font-weight:400;line-height:22px;color:var(--dsw-alias-label-primary)}
-.dsh-uix-desc{color:var(--dsw-alias-label-tertiary);font-size:12px;font-weight:400;line-height:18px}
-.dsh-uix-problem{margin:0;font-size:12px;line-height:1.5;color:var(--dsw-alias-state-error-primary)}
-.dsh-uix-notice{margin:0;font-size:12px;line-height:1.5;color:var(--dsw-alias-state-success-primary)}
-.dsh-uix-disclosure{align-self:flex-start;padding:2px 6px 2px 0;border:0;border-radius:var(--dsw-radius-sm);background:transparent;color:var(--dsw-alias-label-secondary);font:inherit;font-size:12px;line-height:1.5;cursor:pointer}
-.dsh-uix-disclosure:hover{background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-primary)}
-.dsh-uix-disclosure:active{background:var(--dsw-alias-interactive-bg-active)}
-.dsh-uix-disclosure:focus-visible{outline:var(--dsw-focus-ring-width) solid var(--dsw-alias-state-business-primary);outline-offset:2px}
-.dsh-uix-field{display:flex;flex-direction:column;gap:6px;padding:12px 0}
-.dsh-uix-field+.dsh-uix-field{border-top:.5px solid var(--dsw-alias-border-l2)}
-.dsh-uix-label{font-size:13px;font-weight:500;line-height:1.5;color:var(--dsw-alias-label-primary)}
-.dsh-uix-input{height:34px;padding:0 12px;border:.5px solid var(--dsw-alias-border-l4);border-radius:var(--dsw-radius-md);background:var(--dsw-alias-bg-layer-3);font:inherit;font-size:13px;line-height:1.5;color:var(--dsw-alias-label-primary)}
-.dsh-uix-input::placeholder{color:var(--dsw-alias-label-tertiary)}
-.dsh-uix-input:focus-visible{outline:none;border-color:var(--dsw-alias-state-business-primary)}
-.dsh-uix-footer{display:flex;align-items:center;gap:8px;padding-top:16px}
-.dsh-uix-save{appearance:none;border:1px solid transparent;border-radius:var(--dsw-radius-md);padding:5px 14px;font:inherit;font-size:13px;line-height:1.5;cursor:pointer;background:var(--dsw-alias-label-primary);color:var(--dsw-alias-bg-layer-3)}
-.dsh-uix-save:disabled{cursor:not-allowed;opacity:.4}
-.dsh-uix-reset{box-sizing:border-box;display:inline-flex;align-items:center;justify-content:center;border:.5px solid transparent;border-radius:var(--dsw-radius-md);padding:5px 14px;font:inherit;font-size:13px;line-height:1.5;cursor:pointer;background:transparent;color:var(--dsw-alias-label-primary);box-shadow:inset 0 0 0 var(--dsh-hairline-width,.5px) var(--dsh-button-outline-color,var(--dsw-alias-border-l3))}
-.dsh-uix-reset:hover:disabled{background:transparent}
-.dsh-uix-reset:hover:not(:disabled){background:var(--dsw-alias-interactive-bg-hover)}
-.dsh-uix-reset:active:not(:disabled){background:var(--dsw-alias-interactive-bg-active)}
-.dsh-uix-reset:disabled{cursor:not-allowed;opacity:.4}
-.dsh-uix-save:focus-visible,.dsh-uix-reset:focus-visible{outline:var(--dsw-focus-ring-width) solid var(--dsw-alias-state-business-primary);outline-offset:2px}
-.dsh-uix-form{display:flex;flex-direction:column}
-.dsh-uix-hint{margin:0;font-size:12px;line-height:1.5;color:var(--dsw-alias-label-tertiary)}
-.dsh-uix-switch{box-sizing:border-box;position:relative;flex:0 0 auto;width:36px;height:20px;padding:2px;border:0;border-radius:999px;background:var(--dsw-alias-border-l3);cursor:pointer}
-.dsh-uix-switch[aria-checked=true]{background:var(--dsw-alias-brand-primary)}
-.dsh-uix-switch:disabled{cursor:default;opacity:.5}
-.dsh-uix-switch:focus-visible{outline:var(--dsw-focus-ring-width) solid var(--dsw-alias-state-business-primary);outline-offset:2px}
-.dsh-uix-switch-thumb{display:block;width:16px;height:16px;border-radius:50%;background:var(--dsw-alias-label-primary-foreground);transition:transform .12s ease}
-.dsh-uix-switch[aria-checked=false] .dsh-uix-switch-thumb{background:var(--dsw-alias-switch-thumb)}
-.dsh-uix-switch[aria-checked=true] .dsh-uix-switch-thumb{transform:translate(16px)}
-`
-
 function registerClient(): void {
   window.__ModuleLoader__.load({
     id: SOURCE,
@@ -264,7 +218,7 @@ function registerClient(): void {
         ctx.effect(() => ctx.locale.register('ui-experience', DICTS), 'ui-experience: dictionaries')
         ctx.effect(() => {
           const sheet = document.createElement('style')
-          sheet.textContent = CSS
+          sheet.textContent = ROW_CSS
           document.head.appendChild(sheet)
           return () => { sheet.remove() }
         }, 'ui-experience: row styles')
