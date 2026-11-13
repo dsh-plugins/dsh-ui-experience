@@ -85,3 +85,25 @@ export interface SetPathsArgs {
 export interface SetPathsResult {
   paths: PalettePaths
 }
+
+/**
+ * Diagnostics a page reports about the palette override: whether the theme
+ * service accepted the layer, which values the document actually computes, and
+ * whether the live service object is the one the layer was stacked on.
+ */
+export interface ReportArgs {
+  /** How many times an override layer was requested. */
+  attempts: number
+  /** Whether the last attempt returned a disposer. */
+  applied: boolean
+  /** Message when the last attempt threw. */
+  error?: string
+  /** Whether the theme service object exposes overrideTokens. */
+  hasMethod: boolean
+  /** Computed value of the send-button fill, the most visible probe token. */
+  buttonInfoFill: string
+  /** Computed body background, the palette base. */
+  bgBase: string
+  /** Computed switch thumb colour. */
+  switchThumb: string
+}

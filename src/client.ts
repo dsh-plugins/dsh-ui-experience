@@ -11,7 +11,7 @@
 
 import {
   BOOT_ATTRIBUTE, DEFAULT_COLORS_PATH, DEFAULT_TOKENS_PATH, REMOTE_SERVICE,
-  type PalettePaths, type PollArgs, type PollResult, type SetActiveArgs, type SetActiveResult,
+  type PalettePaths, type PollArgs, type PollResult, type ReportArgs, type SetActiveArgs, type SetActiveResult,
   type SetPathsArgs, type SetPathsResult, type ThemeTokenModes,
 } from './shared.ts'
 import { ROW_CSS } from './styles.ts'
@@ -48,6 +48,7 @@ interface UiExperienceRemoteNamespace {
   poll(args: PollArgs): Promise<PollResult>
   setActive(args: SetActiveArgs): Promise<SetActiveResult>
   setPaths(args: SetPathsArgs): Promise<SetPathsResult>
+  report(args: ReportArgs): Promise<{ recorded: boolean }>
 }
 
 /** Theme registry subset this bundle consumes. */
@@ -77,6 +78,8 @@ interface ClientContext {
 }
 
 declare const console: { error(...values: unknown[]): void }
+
+declare const getComputedStyle: (element: unknown) => { getPropertyValue(name: string): string }
 
 declare const document: {
   head: { appendChild(node: unknown): unknown }
@@ -144,7 +147,7 @@ function uiExperienceRemoteContribution(zod: ZodLike): { package: string; descri
     typeSymbol: `${SOURCE}/shared#${name}`,
     create: schema,
   })
-  const descriptor = (method: 'poll' | 'setActive' | 'setPaths', shape: () => Record<string, unknown>, typeName: string): RemoteDescriptor => ({
+  const descriptor = (method: 'poll' | 'setActive' | 'setPaths' | 'report', shape: () => Record<string, unknown>, typeName: string): RemoteDescriptor => ({
     id: `${SOURCE}#${REMOTE_SERVICE}/${method}`,
     service: REMOTE_SERVICE,
     namespace: REMOTE_SERVICE,
@@ -165,6 +168,7 @@ function uiExperienceRemoteContribution(zod: ZodLike): { package: string; descri
       descriptor('poll', () => ({ known: zod.string().optional() }), 'PollArgs'),
       descriptor('setActive', () => ({ active: zod.boolean().optional() }), 'SetActiveArgs'),
       descriptor('setPaths', () => ({ colorsPath: zod.string().optional(), tokensPath: zod.string().optional() }), 'SetPathsArgs'),
+      descriptor('report', () => ({}), 'ReportArgs'),
     ],
   }
 }
@@ -248,6 +252,11 @@ function registerClient(): void {
         let paintedWidth = ''
         let disposeOverride: (() => void) | undefined
         let borderSheet: { textContent: string; remove(): void } | undefined
+        /** DIAGNOSTIC: override attempts and the last error, reported to the Host. */
+        let attempts = 0
+        let lastOverrideError: string | undefined
+        let reported = false
+
         /** Registry the current override layer was stacked on, and its version. */
         let mountedOn: ThemeLike | undefined
         let mountedVersion: string | undefined
@@ -317,13 +326,16 @@ function registerClient(): void {
             return
           }
           clearOverride()
+          attempts += 1
           try {
             disposeOverride = registry.overrideTokens(SOURCE, toOverrides(modes))
             mountedOn = registry
             mountedVersion = version
+            lastOverrideError = undefined
           } catch (error) {
             mountedOn = undefined
             mountedVersion = undefined
+            lastOverrideError = (error as Error).message
             const message = `theme override rejected: ${(error as Error).message}`
             console.error(`ui-experience: ${message}`)
             publish({ problem: message })
@@ -363,6 +375,33 @@ function registerClient(): void {
             }
           } finally {
             remounting = false
+          }
+        }
+
+
+        /**
+         * DIAGNOSTIC: send the page's computed token values to the Host log so a
+         * failed override can be told apart from one that never ran.
+         */
+        const reportOnce = async (): Promise<void> => {
+          if (reported) return
+          reported = true
+          const body = (document as unknown as { body?: unknown }).body
+          const computed = body === undefined ? undefined : getComputedStyle(body)
+          const read = (name: string): string => computed?.getPropertyValue(name).trim() ?? 'n/a'
+          const live = ctx.get('theme') as ThemeLike | undefined
+          try {
+            await gateway.report({
+              attempts,
+              applied: disposeOverride !== undefined,
+              error: lastOverrideError,
+              hasMethod: typeof live?.overrideTokens === 'function',
+              buttonInfoFill: read('--dsw-alias-button-info-fill'),
+              bgBase: read('--dsw-alias-bg-base'),
+              switchThumb: read('--dsw-alias-switch-thumb'),
+            })
+          } catch (error) {
+            console.error(`ui-experience: diagnostic report failed: ${(error as Error).message}`)
           }
         }
 
@@ -500,6 +539,7 @@ function registerClient(): void {
           if (disposed) return
           lastRpcProblem = ''
           adopt(answer)
+          void reportOnce()
         }
 
         /**

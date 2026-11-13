@@ -19,7 +19,7 @@ import z from '@deepseek-ai/schemastery'
 import { TypertRemoteService } from '@deepseek-ai/dsh-typert-protocol'
 import {
   BOOT_ATTRIBUTE, DEFAULT_COLORS_PATH, DEFAULT_TOKENS_PATH, REMOTE_SERVICE,
-  type PalettePaths, type PollArgs, type PollResult, type SetActiveArgs, type SetActiveResult,
+  type PalettePaths, type PollArgs, type PollResult, type ReportArgs, type SetActiveArgs, type SetActiveResult,
   type SetPathsArgs, type SetPathsResult, type ThemeTokenModes, type ThemeTokenTable,
 } from './shared.ts'
 
@@ -665,6 +665,16 @@ class UiExperienceService extends TypertRemoteService {
   }
 
   /**
+   * Remote endpoint recording a page's palette diagnostics in the plugin log.
+   * @param args - what the page observed about the override.
+   * @returns nothing; the value is the log line.
+   */
+  report(args?: ReportArgs): { recorded: true } {
+    logLine(`page report: ${JSON.stringify(args ?? {})}`)
+    return { recorded: true }
+  }
+
+  /**
    * Write one configuration change through the config editor, logging the
    * failure before it reaches the caller.
    * @param change - derives the next raw config from the current one.
@@ -691,6 +701,7 @@ Object.defineProperty(UiExperienceService.prototype, REMOTE_METHOD_DESCRIPTOR, {
       Object.freeze({ method: 'poll', invocation: Object.freeze({ kind: 'direct' }) }),
       Object.freeze({ method: 'setActive', invocation: Object.freeze({ kind: 'direct' }) }),
       Object.freeze({ method: 'setPaths', invocation: Object.freeze({ kind: 'direct' }) }),
+      Object.freeze({ method: 'report', invocation: Object.freeze({ kind: 'direct' }) }),
     ]),
   }),
 })
