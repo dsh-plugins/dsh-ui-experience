@@ -225,7 +225,7 @@ const DICTS: Record<string, Record<string, string>> = {
     'palette.reset': '恢复默认',
     'palette.paths-hint': '支持以 ~ 开头的路径，或绝对路径。颜色文件提供完整映射，令牌文件里列出的 token 逐项覆盖。',
     'motion.title': 'M3 动效',
-    'motion.description': '按 Material 3 曲线改写整个界面的过渡与关键帧动画，原地改写入已生效的样式规则',
+    'motion.description': '按 Material 3 曲线改写整个界面的过渡与关键帧动画，直接改写已生效的样式规则',
     'motion.mode': '曲线族',
     'motion.mode-off': '关闭',
     'motion.mode-m3': 'M3',
@@ -233,7 +233,7 @@ const DICTS: Record<string, Record<string, string>> = {
     'motion.duration': '时长倍率',
     'motion.options': '高级选项',
     'motion.spatial-split': '位移与效果使用不同曲线',
-    'motion.spatial-split-hint': 'M3E 的位移曲线带有约 9% 的过冲，效果曲线没有。关闭后全部使用效果曲线。',
+    'motion.spatial-split-hint': '位移曲线带过冲（快位移约 9%，默认位移约 1.4%），效果曲线没有。关闭后全部使用效果曲线。',
     'motion.quantize': '时长对齐到 Material 档位',
     'motion.quantize-hint': '把改写后的时长吸附到 50/100/150/200/250/300/350/400/450/500/550/600/700/800/900/1000ms。',
     'motion.reduced': '始终减弱动效',
@@ -263,7 +263,7 @@ const DICTS: Record<string, Record<string, string>> = {
     'motion.duration': 'Duration scale',
     'motion.options': 'Advanced options',
     'motion.spatial-split': 'Spatial and effects take different curves',
-    'motion.spatial-split-hint': 'The M3E spatial curve overshoots by about 9%, the effects curve does not. Turning this off uses the effects curve everywhere.',
+    'motion.spatial-split-hint': 'The spatial curves overshoot (about 9% for the fast one, 1.4% for the default); the effects curve does not. Turning this off uses the effects curve everywhere.',
     'motion.quantize': 'Snap durations to the Material ladder',
     'motion.quantize-hint': 'Pull rewritten durations onto 50/100/150/200/250/300/350/400/450/500/550/600/700/800/900/1000 ms.',
     'motion.reduced': 'Always reduce motion',
@@ -903,12 +903,17 @@ function registerClient(): void {
             { value: 'm3', label: tr('motion.mode-m3') },
             { value: 'm3e', label: tr('motion.mode-m3e') },
           ]
-          const scales: Segment[] = [
-            { value: '1', label: '1×' },
-            { value: '1.25', label: '1.25×' },
-            { value: '1.5', label: '1.5×' },
-            { value: '2', label: '2×' },
-          ]
+          // The schema accepts 0.5–2 while the row offers four steps. A value set
+          // by hand in the patch file is added to the ladder rather than being
+          // silently unreachable: without it the indicator would sit on the first
+          // segment with nothing selected, and picking 1× would overwrite it.
+          const ladder = [0.5, 0.75, 1, 1.25, 1.5, 2]
+          if (!ladder.includes(current.durationScale)) ladder.push(current.durationScale)
+          ladder.sort((left, right) => left - right)
+          const scales: Segment[] = ladder.map(value => ({
+            value: String(value),
+            label: `${value}×`,
+          }))
 
           const policy = open
             ? h('div', { className: 'dsh-uix-form' },

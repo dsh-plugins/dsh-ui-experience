@@ -819,8 +819,16 @@ class UiExperienceService extends TypertRemoteService {
     if (reduced !== undefined && !MOTION_REDUCED.test(reduced)) {
       throw new Error(`ui-experience: unknown reduced-motion policy ${JSON.stringify(reduced)}`)
     }
-    if (scale !== undefined && (!Number.isFinite(scale) || scale < 0.5 || scale > 2)) {
+    if (scale !== undefined && (typeof scale !== 'number' || !Number.isFinite(scale) || scale < 0.5 || scale > 2)) {
       throw new Error(`ui-experience: durationScale ${String(scale)} is outside 0.5–2`)
+    }
+    // These two arrive as arbitrary JSON from the page, and the wire contract is
+    // plain JSON, so nothing upstream has coerced them to booleans.
+    if (spatialSplit !== undefined && typeof spatialSplit !== 'boolean') {
+      throw new Error(`ui-experience: spatialSplit must be a boolean, got ${typeof spatialSplit}`)
+    }
+    if (quantize !== undefined && typeof quantize !== 'boolean') {
+      throw new Error(`ui-experience: quantize must be a boolean, got ${typeof quantize}`)
     }
     await this.persist(current => ({
       ...current,

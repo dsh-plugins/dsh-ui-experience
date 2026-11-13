@@ -34,10 +34,16 @@ interface StyleDeclarationLike {
 
 /** A style rule, or a grouping rule such as `@media` holding more of them. */
 interface RuleLike {
+  /** `CSSRule.type`; `7` is `CSSKeyframesRule`, which also carries `name` and
+   *  `cssRules` and would otherwise be confused with a named `@layer` block. */
+  type?: number
   style?: StyleDeclarationLike
   cssRules?: RuleListLike
   name?: string
 }
+
+/** `CSSRule.KEYFRAMES_RULE`. */
+const KEYFRAMES_RULE = 7
 
 /** An indexed list of rules, as CSSOM exposes it. */
 interface RuleListLike {
@@ -72,11 +78,11 @@ const ANIMATIONS: FamilySpec = {
   iterations: 'animation-iteration-count',
 }
 
-/** The duration custom properties the shipped sheets reference, and their values. */
+/** The duration custom properties the shipped sheets reference. */
 const DURATION_TOKENS = [
-  ['--ds-transition-duration', 200],
-  ['--ds-transition-duration-fast', 100],
-  ['--ds-transition-duration-slow', 300],
+  '--ds-transition-duration',
+  '--ds-transition-duration-fast',
+  '--ds-transition-duration-slow',
 ] as const
 
 /** One rewritten declaration block, with the text needed to restore it. */
@@ -102,15 +108,17 @@ declare const document: {
     removeAttribute(name: string): void
   }
   readonly head: { appendChild(node: unknown): unknown }
+  readonly body: unknown
   createElement(tag: 'style'): { textContent: string; remove(): void }
 }
 
 declare const window: {
   matchMedia(query: string): {
     readonly matches: boolean
-    addEventListener?(kind: 'change', listener: () => void): void
-    removeEventListener?(kind: 'change', listener: () => void): void
+    addEventListener(kind: 'change', listener: () => void): void
+    removeEventListener(kind: 'change', listener: () => void): void
   }
+  getComputedStyle(element: unknown): { getPropertyValue(name: string): string }
 }
 
 declare const MutationObserver: new (callback: () => void) => {
@@ -211,7 +219,7 @@ export function createMotion(): MotionRuntime {
     const frames = new Map<string, string[]>()
     for (const sheet of sheets) {
       walk(sheet.cssRules, (rule) => {
-        if (rule.name === undefined || rule.cssRules === undefined) return
+        if (rule.type !== KEYFRAMES_RULE || rule.name === undefined || rule.cssRules === undefined) return
         const properties = frames.get(rule.name) ?? []
         walk(rule.cssRules, (frame) => {
           const declaration = frame.style
@@ -306,7 +314,7 @@ export function createMotion(): MotionRuntime {
       declaration.setProperty(family.timing, nextTimings.join(', '))
       changed = true
     }
-    if (durationChanged && nextDurations.length === count) {
+    if (durationChanged) {
       declaration.setProperty(family.duration, nextDurations.join(', '))
       changed = true
     }
@@ -324,9 +332,13 @@ export function createMotion(): MotionRuntime {
         const declaration = rule.style
         if (declaration === undefined || patches.has(rule)) return
         const before = declaration.cssText
-        const touched = rewriteFamily(declaration, TRANSITIONS, frames, active)
-          || rewriteFamily(declaration, ANIMATIONS, frames, active)
-        if (!touched) return
+        // Both families are evaluated before the results are combined: a rule may
+        // legitimately declare a transition and an animation at once (the status
+        // indicator and the dock hint both do), and short-circuiting on the first
+        // hit would leave the second family on the shipped curve.
+        const movedTransition = rewriteFamily(declaration, TRANSITIONS, frames, active)
+        const movedAnimation = rewriteFamily(declaration, ANIMATIONS, frames, active)
+        if (!movedTransition && !movedAnimation) return
         patches.set(rule, { declaration, before, after: declaration.cssText })
       })
     }
@@ -336,14 +348,24 @@ export function createMotion(): MotionRuntime {
   function applyDurationTokens(): void {
     const active = settings
     if (active === undefined || active.durationScale === 1) return
-    for (const [token, base] of DURATION_TOKENS) {
-      document.documentElement.style.setProperty(token, `${Math.round(base * active.durationScale)}ms`)
+    const root = document.documentElement
+    // The base value is read from the page rather than assumed: DSH owns those
+    // three tokens, and a release that retunes them must not be scaled from a
+    // number this layer remembered from an older one.
+    const computed = window.getComputedStyle(root)
+    for (const token of DURATION_TOKENS) {
+      const base = parseDurationMs(computed.getPropertyValue(token).trim())
+      if (base === undefined) {
+        console.error(`ui-experience: motion cannot read ${token}; durations using it keep their shipped value`)
+        continue
+      }
+      root.style.setProperty(token, `${Math.round(base * active.durationScale)}ms`)
     }
   }
 
   /** Put the duration custom properties back to the shipped values. */
   function clearDurationTokens(): void {
-    for (const [token] of DURATION_TOKENS) document.documentElement.style.removeProperty(token)
+    for (const token of DURATION_TOKENS) document.documentElement.style.removeProperty(token)
   }
 
   /** Whether the reduced-motion policy currently asks for a still page. */
@@ -355,12 +377,11 @@ export function createMotion(): MotionRuntime {
   }
 
   /**
-   * Realize the reduced-motion policy. This is the one thing a rule-by-rule
+   * Install or remove the still-page sheet. This is the one thing a rule-by-rule
    * rewrite cannot express, because it has to silence declarations this layer
    * never wrote; it is also the one place `!important` is correct.
    */
-  function syncReduced(): void {
-    const want = wantsReduced()
+  function setReducedSheet(want: boolean): void {
     if (want === reducedActive) return
     reducedActive = want
     reducedSheet?.remove()
@@ -375,6 +396,29 @@ export function createMotion(): MotionRuntime {
   }
 
   /**
+   * Bring the page in line with the current settings: nothing while the layer is
+   * off, only the still-page sheet while the policy holds the page still, and
+   * tokens plus a full scan otherwise.
+   */
+  function realize(): void {
+    const active = settings
+    if (active === undefined || active.mode === 'off') return
+    const want = wantsReduced()
+    setReducedSheet(want)
+    if (want) {
+      // Every duration is forced to 1ms under the still-page policy, so rewritten
+      // curves would be invisible work. Undoing them here means lifting the policy
+      // is a plain rescan against the authored declarations.
+      restoreDeclarations()
+      clearDurationTokens()
+      return
+    }
+    applyDurationTokens()
+    scan()
+    observer ??= observeDocument()
+  }
+
+  /**
    * Rescan for new declarations without disturbing the existing patches. Bursts
    * of appended nodes collapse into one scan on the next microtask.
    */
@@ -383,8 +427,6 @@ export function createMotion(): MotionRuntime {
     refreshPending = true
     queueMicrotask(() => {
       refreshPending = false
-      const active = settings
-      if (active === undefined || active.mode === 'off' || reducedActive) return
       scan()
     })
   }
@@ -398,26 +440,33 @@ export function createMotion(): MotionRuntime {
    */
   function observeDocument(): { disconnect(): void } {
     const instance = new MutationObserver(() => { refresh() })
+    // `head` covers a bundle that appends a `<style>`; `body` covers one that
+    // appends it next to its own slot instead. `adoptedStyleSheets` is not a DOM
+    // mutation at all, so it is only picked up by the scan in `realize`.
     instance.observe(document.head, { childList: true, subtree: true })
+    instance.observe(document.body, { childList: true, subtree: true })
     return { disconnect: () => { instance.disconnect() } }
   }
 
   /** Drop the system preference listener. */
   function unwatchPreference(): void {
     if (mediaListener === undefined) return
-    media.removeEventListener?.('change', mediaListener)
+    media.removeEventListener('change', mediaListener)
     mediaListener = undefined
   }
 
   /** Register (once) the system preference listener the `system` policy needs. */
   function watchPreference(): void {
     if (mediaListener !== undefined) return
-    mediaListener = (): void => { syncReduced() }
-    media.addEventListener?.('change', mediaListener)
+    // The listener re-realizes the whole layer, not just the still-page sheet: a
+    // page that started still never got tokens or a scan, so lifting the policy
+    // has to run that work rather than merely dropping the sheet.
+    mediaListener = (): void => { realize() }
+    media.addEventListener('change', mediaListener)
   }
 
   /** Put every rewritten declaration back exactly as it was authored. */
-  function restore(): void {
+  function restoreDeclarations(): void {
     for (const patch of patches.values()) {
       if (patch.declaration.cssText !== patch.after) {
         console.error('ui-experience: motion restore overwrote a declaration that changed after this layer wrote it')
@@ -425,11 +474,17 @@ export function createMotion(): MotionRuntime {
       patch.declaration.cssText = patch.before
     }
     patches.clear()
+  }
+
+  /** Undo every page-level change and stop following the page. */
+  function restore(): void {
+    restoreDeclarations()
     clearDurationTokens()
-    reducedSheet?.remove()
-    reducedSheet = undefined
-    reducedActive = false
+    setReducedSheet(false)
     unwatchPreference()
+    observer?.disconnect()
+    observer = undefined
+    settings = undefined
     document.documentElement.removeAttribute(MOTION_ATTRIBUTE)
   }
 
@@ -439,25 +494,13 @@ export function createMotion(): MotionRuntime {
       settings = next
       if (next.mode === 'off') return
       watchPreference()
-      syncReduced()
-      if (reducedActive) {
-        // Every duration is forced to 1 ms under this policy, so rewriting curves
-        // would be invisible work. The attribute still records the state.
-        document.documentElement.setAttribute(MOTION_ATTRIBUTE, next.mode)
-        return
-      }
-      applyDurationTokens()
-      scan()
-      observer ??= observeDocument()
+      // The attribute records the family even while the still-page policy is
+      // holding the page still, so an inspector can tell the two states apart.
       document.documentElement.setAttribute(MOTION_ATTRIBUTE, next.mode)
+      realize()
     },
     refresh,
     restore,
-    dispose(): void {
-      restore()
-      observer?.disconnect()
-      observer = undefined
-      settings = undefined
-    },
+    dispose(): void { restore() },
   }
 }

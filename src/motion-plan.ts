@@ -35,11 +35,16 @@ const SPATIAL_PROPERTIES = new Set([
 ])
 
 /**
- * The curves this layer writes, as cubic Bézier control points. Material 3 and
- * Material 3 Expressive each split movement from effect: movement may decelerate
- * hard or overshoot, while colours and opacity must not overshoot at all, because
- * an interpolated colour that passes 1.09 of its target flashes through values
- * the palette never contained.
+ * The curves this layer writes, as cubic Bézier control points. Both families
+ * split movement from effect: movement may decelerate hard or overshoot, while
+ * colours and opacity must not overshoot at all, because a colour interpolated
+ * past its target flashes through values the palette never contained.
+ *
+ * `CURVE_M3_SPATIAL` is Material 3's `emphasized decelerate` token. Material 3's
+ * whole `emphasized` curve is two chained cubics, which `cubic-bezier()` cannot
+ * express, so the web token sheet lists it as unavailable and falls back to
+ * `standard`; taking the decelerate half by name keeps the movement side of the
+ * split distinct without inventing a curve Material does not publish.
  */
 const CURVE_M3_SPATIAL = 'cubic-bezier(0.05, 0.7, 0.1, 1)'
 const CURVE_M3_EFFECTS = 'cubic-bezier(0.2, 0, 0, 1)'
@@ -48,10 +53,11 @@ const CURVE_M3E_SPATIAL = 'cubic-bezier(0.38, 1.21, 0.22, 1)'
 const CURVE_M3E_EFFECTS = 'cubic-bezier(0.34, 0.8, 0.34, 1)'
 
 /**
- * Durations at or below this threshold take the fast spatial curve: the
- * expressive default curve needs roughly a fifth of a second to complete its
- * overshoot, and a shorter declaration would be retimed anyway, so pairing it
- * with the fast variant keeps the shape readable at the original length.
+ * Durations at or below this threshold take the fast spatial curve. The
+ * expressive default curve spreads its deceleration — and its overshoot — over
+ * roughly half a second; pairing it with a 120 ms transition compresses the
+ * whole shape into a flick, so the short declarations get the curve Material
+ * designed for them.
  */
 const FAST_SPATIAL_MAX_MS = 200
 
@@ -111,7 +117,6 @@ export function parseDurationMs(value: string): number | undefined {
   const match = DURATION.exec(value.trim())
   if (match === null) return undefined
   const amount = Number(match[1])
-  if (!Number.isFinite(amount) || amount < 0) return undefined
   return match[2] === 's' ? amount * 1000 : amount
 }
 
@@ -137,19 +142,28 @@ function quantizeMs(ms: number): number {
 const MAX_DURATION_MS = 10000
 
 /**
+ * Durations below this are treated as "as fast as possible" rather than as a
+ * speed to retime. The shipped sheets spell that intent as 0s, `0.01ms`, and
+ * `1ms`; scaling a hundredth of a millisecond to a whole one would change a
+ * deliberately instant transition into a visible one.
+ */
+const NEGLIGIBLE_MS = 1
+
+/**
  * Retime one duration entry.
  * @param value - the declared entry.
  * @param scale - multiplier applied before quantization.
  * @param quantize - whether to snap onto the Material ladder.
  * @returns the replacement entry, or undefined when the declaration must stay
- * exactly as written (a token reference, a zero, a non-literal, or a scale of 1
- * with quantization off).
+ * exactly as written: a token reference, a non-literal, a duration at or below
+ * `NEGLIGIBLE_MS`, or a scale of 1 with quantization off.
  */
 export function retime(value: string, scale: number, quantize: boolean): string | undefined {
+  if (scale === 1 && !quantize) return undefined
   const original = parseDurationMs(value)
-  if (original === undefined || original === 0) return undefined
+  if (original === undefined || original <= NEGLIGIBLE_MS) return undefined
   const scaled = Math.round(original * scale)
-  const target = Math.min(MAX_DURATION_MS, Math.max(1, quantize ? quantizeMs(scaled) : scaled))
+  const target = Math.min(MAX_DURATION_MS, Math.max(NEGLIGIBLE_MS, quantize ? quantizeMs(scaled) : scaled))
   if (target === original) return undefined
   return `${target}ms`
 }
@@ -201,10 +215,8 @@ export function classifyAll(properties: Iterable<string>): MotionDomain {
 export function curveFor(
   mode: MotionMode, domain: MotionDomain, spatialSplit: boolean, originalMs: number | undefined,
 ): string {
-  // Material 3's emphasized family is a five-point Bézier with no cubic-bezier()
-  // form, but its two halves each are: the decelerate half is what a movement
-  // into place wants, and the standard curve serves everything that is not
-  // movement. Turning the split off falls through to the effects curve.
+  // The layer cannot tell an entrance from an exit, so every movement gets the
+  // decelerate curve; Material would give an exit the accelerate half instead.
   if (mode === 'm3') {
     return spatialSplit && domain === 'spatial' ? CURVE_M3_SPATIAL : CURVE_M3_EFFECTS
   }

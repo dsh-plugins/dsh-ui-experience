@@ -79,6 +79,11 @@ export interface PollArgs {
  * Result of the poll endpoint. `active`, `borderWidth`, `paths`, and `motion`
  * ride every response, so a configuration-only edit reaches the client without
  * waiting for a matugen regeneration.
+ *
+ * `motion` is optional because the two halves reload on different schedules: the
+ * browser half comes from a page refresh, the host half only from a process
+ * restart. After a plugin upgrade but before a restart, the page runs this build
+ * against a host that does not send the field yet, and the layer stays inert.
  */
 export type PollResult =
   | {
@@ -90,7 +95,7 @@ export type PollResult =
     active: boolean
     borderWidth: string
     paths: PalettePaths
-    motion: MotionSettings
+    motion?: MotionSettings
   }
   | {
     status: 'missing' | 'error'
@@ -98,7 +103,7 @@ export type PollResult =
     active: boolean
     borderWidth: string
     paths: PalettePaths
-    motion: MotionSettings
+    motion?: MotionSettings
   }
 
 /** Arguments of the setActive endpoint. */
