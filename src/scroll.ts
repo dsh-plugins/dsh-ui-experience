@@ -1,64 +1,73 @@
 /**
- * Scripted smooth scrolling for `scrollIntoView`.
+ * Scripted smooth scrolling, and the `scrollend` semantics that make it safe.
  *
- * The browser owns the timing of a smooth reveal: neither CSS nor a `scroll`
- * listener can read its duration or its curve, so a page whose transitions all
- * follow Material curves still glides to a located row on the UA's own ease for
- * an unspecified length. This layer replaces that one call with scripted travel
- * on the same curve family the rest of the bundle applies.
+ * The browser owns the timing of `behavior: 'smooth'`: neither CSS nor a
+ * `scroll` listener can read its duration or its curve, so a page whose
+ * transitions all follow Material curves still glides on the UA's own ease for
+ * an unspecified length. This layer replaces that motion with scripted travel on
+ * the same curve family the rest of the bundle applies.
  *
- * WHY ONLY `scrollIntoView`
+ * WHY SCRIPTED SCROLLING NEEDED A SECOND PIECE
  *
- * Taking over `scrollTo` / `scrollBy` as well would break the chat transcript.
- * Its follow controller sets a target, then settles on `scrollend`; measured in
- * Chrome 156 over the same 1200px travel, a native smooth scroll delivers 56
- * `scroll` events and exactly 1 `scrollend`, while writing `scrollTop` once per
- * animation frame delivers 21 and **21** — the browser ends each instant scroll on
- * its own. The controller reads the first of those as "the reader stopped short"
- * and drops follow intent on the first frame. The calls that feed that loop
- * therefore stay native.
+ * Scrolling by writing `scrollTop` once per frame is a series of *instant*
+ * scrolls, and the browser ends each of them on its own. Measured in Chrome 156
+ * over the same 1200px of travel:
  *
- * `scrollIntoView` is the one-shot family instead — reveal a trajectory row,
- * centre a plugin card, jump to a session-inspector node.
+ *   native `behavior: 'smooth'`        56 `scroll` events, 1 `scrollend`
+ *   one `scrollTop` write per frame    21 `scroll` events, 21 `scrollend`
  *
- * KNOWN CONSEQUENCE, AND WHY THIS SHIPS OFF
+ * Everything on this page that decides "the scroll has come to rest" listens for
+ * `scrollend`: the chat transcript's follow controller settles its target on it,
+ * and the session inspector's reveal places its highlight on it. Feeding them 21
+ * ends per gesture makes each of them conclude the reader stopped short, on the
+ * first frame.
  *
- * Those per-frame `scrollend` events reach every listener on the page, and one
- * shipping consumer does count them: the session inspector's reveal highlights a
- * node once scrolling settles (`reveal.ts` → `onEnd` → `finish`). Measured against
- * the built bundle in Chrome 156, its settle callback fires at 1 ms with the
- * scrollport still at its origin, so the highlight is placed on a row that has not
- * arrived yet. The instant jump also contributes one `scroll`/`scrollend` pair
- * before the first animation frame, which is enough on its own.
+ * So the layer also *shadows* `scrollend`: while it is moving a container, that
+ * container's real `scrollend` events are stopped at the capture phase, and one
+ * synthetic event is dispatched when the run actually finishes or is cancelled.
+ * Every consumer sees the sequence a native smooth scroll would have produced —
+ * one `scroll` stream, exactly one end.
  *
- * There is no way for this layer to keep the timing and deny those events, so the
- * setting defaults to off. Turning it on is a deliberate trade: locating jumps on
- * the page curve, at the cost of any consumer that settles on `scrollend`.
+ * WHAT IS TAKEN OVER
  *
- * Two rules are fixed and are not configurable:
+ * `scrollTo` and `scrollBy` cover both one-shot locating (a virtualized table
+ * jumping to a row) and the streaming follow loop, which retargets itself many
+ * times a second. Only the first kind is worth scripting: a run that is retargeted
+ * every frame would be restarted every frame, so its curve never plays. The
+ * discriminator is the call pattern — a second smooth request on the same
+ * container inside `RETARGET_WINDOW` is a controller chasing a moving target, and
+ * from then on that container's scrolling is handed back to the browser.
  *
- * 1. The reader wins. A wheel or touch over a container being scrolled, or a
- *    scroll key outside a text field, cancels the scripted run outright — it does
- *    not blend, and it does not resume. A position change this layer did not write
- *    cancels it too, which catches what the event list cannot see: a scrollbar
- *    drag, an assistive-technology scroll, a container that reflowed mid-run.
+ * FIXED RULES, NOT CONFIGURABLE
+ *
+ * 1. The reader wins. A wheel or touch over a container being moved, or a scroll
+ *    key outside a text field, cancels the run outright — it does not blend, and
+ *    it does not resume. A position change this layer did not write cancels it
+ *    too, which catches a scrollbar drag, an assistive-technology scroll, or a
+ *    container that reflowed mid-run.
  * 2. The curve is the effects curve, never the spatial one. A spatial curve
  *    overshoots, and overshoot while scrolling sends the content past the row the
- *    reader was sent to before it settles back — the destination lands wrong
- *    twice. The family still applies; the overshooting half never does.
+ *    reader was sent to before settling back — the destination lands wrong twice.
  */
 
 import { type MotionSettings } from './shared.ts'
 import { easeCurve, effectCurvePoints, quantizeMs } from './motion-plan.ts'
 
-/** `ScrollIntoViewOptions`, restated so this file needs no DOM lib. */
+/** `ScrollToOptions`, restated so this file needs no DOM lib. */
+interface ScrollToOptions {
+  top?: number
+  left?: number
+  behavior?: 'auto' | 'instant' | 'smooth'
+}
+
+/** `ScrollIntoViewOptions`, restated for the same reason. */
 interface ScrollIntoViewOptions {
   behavior?: 'auto' | 'instant' | 'smooth'
   block?: 'start' | 'center' | 'end' | 'nearest'
   inline?: 'start' | 'center' | 'end' | 'nearest'
 }
 
-/** The element face this module reads. */
+/** The scrollable-element face this module patches and reads. */
 interface ElementLike {
   scrollTop: number
   scrollLeft: number
@@ -69,6 +78,9 @@ interface ElementLike {
   readonly parentElement: ElementLike | null
   contains(other: unknown): boolean
   closest(selectors: string): unknown
+  dispatchEvent(event: unknown): boolean
+  scrollTo(options?: ScrollToOptions | number, y?: number): void
+  scrollBy(options?: ScrollToOptions | number, y?: number): void
   scrollIntoView(options?: boolean | ScrollIntoViewOptions): void
 }
 
@@ -89,19 +101,22 @@ interface Run {
   /** The last position this run wrote per leg, to notice a foreign scroll. */
   readonly written: Array<{ top: number; left: number }>
   frame: number
+  /** Resolves the caller's promise and releases the shadowed ends. */
   readonly done: () => void
 }
 
-/** A minimal event face: only the type, the target and, for keys, the key. */
+/** A minimal event face: the type, the target and, for keys, the key. */
 interface EventLike {
   readonly type: string
   readonly target: EventTarget | null
   readonly key?: string
+  /** Present on real events; the shadowing path is the only caller that needs it. */
+  stopImmediatePropagation(): void
 }
 
-/** Shortest scripted reveal; below this the motion reads as a jump anyway. */
+/** Shortest scripted scroll; below this the motion reads as a jump anyway. */
 const MIN_MS = 180
-/** Longest scripted reveal, so a full-pane jump never drags. */
+/** Longest scripted scroll, so a full-pane jump never drags. */
 const MAX_MS = 460
 /** Distance the floor covers; travel past it adds time. */
 const FREE_PX = 240
@@ -111,14 +126,22 @@ const GROWTH_MS_PER_PX = 0.2
 /**
  * Slack for comparing two positions that both came back from the browser. They
  * are already snapped to its pixel grid: a whole pixel at dpr 1, a 2/3 step at
- * dpr 1.5, half a pixel at dpr 2. This only absorbs the finest of those, so a
- * genuine half-pixel move on a dpr 2 display reads as no movement — accepted,
- * because it is not visible.
+ * dpr 1.5, half a pixel at dpr 2. This absorbs the finest of those, so a genuine
+ * half-pixel move on a dpr 2 display reads as no movement — accepted, it is not
+ * visible.
  */
 const MOTION_EPSILON = 0.5
 
-/** Difference past which a position the layer did not write is a foreign scroll. */
+/** Difference past which a position this layer did not write is a foreign scroll. */
 const FOREIGN_TOLERANCE = 1
+
+/**
+ * Window in which a second smooth request on the same container is read as a
+ * controller retargeting a moving target rather than a person asking to be taken
+ * somewhere once. Measured follow loops retarget on every content change, which
+ * during streaming is far inside this window.
+ */
+const RETARGET_WINDOW = 300
 
 /** Keys that scroll the page, by `KeyboardEvent.key`. */
 const SCROLL_KEYS = new Set([
@@ -150,6 +173,7 @@ declare const Element: {
   prototype: ElementLike
   new (): ElementLike
 }
+declare const Event: new (type: string, init?: { bubbles?: boolean }) => unknown
 declare const window: {
   requestAnimationFrame(callback: (time: number) => void): number
   cancelAnimationFrame(handle: number): void
@@ -216,25 +240,78 @@ function containers(element: ElementLike): ElementLike[] {
 }
 
 /**
- * Build the scripted-reveal layer. It starts inert; `apply` installs the patch.
+ * Build the scripted-scroll layer. It starts inert; `apply` installs the patches.
  * @returns the handle the client keeps for the bundle's lifetime.
  */
 export function createScrollMotion(): {
   apply(settings: MotionSettings): void
   restore(): void
 } {
-  const shipped = Element.prototype.scrollIntoView as unknown as
-    (this: ElementLike, ...args: unknown[]) => Promise<void> | undefined
+  const shipped = {
+    scrollTo: Element.prototype.scrollTo as (this: ElementLike, ...args: unknown[]) => Promise<void> | undefined,
+    scrollBy: Element.prototype.scrollBy as (this: ElementLike, ...args: unknown[]) => Promise<void> | undefined,
+    scrollIntoView: Element.prototype.scrollIntoView as (this: ElementLike, ...args: unknown[]) => Promise<void> | undefined,
+  }
   let settings: MotionSettings | undefined
   let run: Run | undefined
   let installed = false
+  /**
+   * Containers whose real `scrollend` is withheld right now, and until when.
+   * `Infinity` means "for as long as the run moves it"; a timestamp means "this
+   * long after the run ended", which covers the end the browser still owes for
+   * the final position write.
+   */
+  const shadowed = new WeakMap<ElementLike, number>()
+  /** Last smooth request per container, for the retarget discriminator. */
+  const lastRequest = new WeakMap<ElementLike, number>()
+  /** Set while this layer dispatches its own end, so it does not withhold it. */
+  let dispatching = false
 
-  /** Stop the in-flight run where it is, resolving its promise. */
-  function cancel(): void {
+  /**
+   * How long the end the browser owes for a run's last write is withheld after
+   * the run finishes. That end lands within a frame or two; a native scroll
+   * started afterwards ends hundreds of milliseconds later, so it passes.
+   */
+  const END_GRACE_MS = 120
+
+  /** Shadow one container for as long as a run is moving it. */
+  function hold(element: ElementLike): void {
+    shadowed.set(element, Number.POSITIVE_INFINITY)
+  }
+
+  /**
+   * Release one container.
+   * @param element - the container a run has stopped moving.
+   * @param notify - whether to hand its consumer the single end the run owes. A
+   * run that is handing the container back to the browser must stay silent, since
+   * the native scroll about to start raises its own end.
+   */
+  function release(element: ElementLike, notify: boolean): void {
+    if (!shadowed.has(element)) return
+    shadowed.set(element, performance.now() + END_GRACE_MS)
+    if (!notify) return
+    // Async so the position write that ended the run is visible to the listener,
+    // the way it is when the browser raises the real event.
+    queueMicrotask(() => {
+      dispatching = true
+      try {
+        element.dispatchEvent(new Event('scrollend'))
+      } finally {
+        dispatching = false
+      }
+    })
+  }
+
+  /**
+   * Stop the in-flight run where it is.
+   * @param notify - whether its containers owe their consumer an end.
+   */
+  function cancel(notify = true): void {
     const active = run
     if (active === undefined) return
     window.cancelAnimationFrame(active.frame)
     run = undefined
+    for (const leg of active.legs) release(leg.element, notify)
     active.done()
   }
 
@@ -279,6 +356,7 @@ export function createScrollMotion(): {
       // The final frame writes the un-eased target. The browser may snap it to a
       // whole pixel, so the landing position can differ by less than one.
       run = undefined
+      for (const leg of active.legs) release(leg.element, true)
       active.done()
       return
     }
@@ -287,15 +365,16 @@ export function createScrollMotion(): {
 
   /**
    * Start one run, replacing any run in flight. Legs are captured from the
-   * current position, so a second reveal mid-flight retargets.
+   * current position, so a second request mid-flight retargets.
    * @param legs - the legs to animate.
    * @param done - resolves the caller's promise when the run ends or is cancelled.
    */
   function start(legs: readonly Leg[], done: () => void): void {
     cancel()
-    // `apply` only installs the patch when it has settings, so a run cannot begin
+    // `apply` only installs the patches when it has settings, so a run cannot begin
     // without them.
     const active = settings as MotionSettings
+    for (const leg of legs) hold(leg.element)
     run = {
       legs,
       started: performance.now(),
@@ -314,6 +393,19 @@ export function createScrollMotion(): {
   }
 
   /**
+   * Whether a smooth request is a controller retargeting rather than a one-shot
+   * locate. Records the request either way.
+   * @param element - the container the request names.
+   * @returns whether the browser should take this one.
+   */
+  function isRetarget(element: ElementLike): boolean {
+    const now = performance.now()
+    const previous = lastRequest.get(element)
+    lastRequest.set(element, now)
+    return previous !== undefined && now - previous < RETARGET_WINDOW
+  }
+
+  /**
    * The patched `scrollIntoView`.
    *
    * The final offset depends on alignment, `scroll-margin`, nested containers and
@@ -321,11 +413,11 @@ export function createScrollMotion(): {
    * the wrong row. Instead the browser is asked for an instant jump, every moved
    * container's landing position is read, all of them are put back, and those
    * captured positions are animated. Jump and restore happen inside one task, so
-   * the intermediate position never paints.
+   * the intermediate position never paints — and the ends the jump raises are
+   * shadowed along with the rest of the run.
    *
    * Takes the arguments as a rest list so the patched function keeps the native
-   * `length` of 0; a library that inspects the signature still sees what it
-   * expects.
+   * `length` of 0 and, being named `scrollIntoView`, the native `name`.
    */
   function scrollIntoView(this: ElementLike, ...args: unknown[]): Promise<void> | undefined {
     const options = args[0]
@@ -333,13 +425,16 @@ export function createScrollMotion(): {
       ? options as ScrollIntoViewOptions
       : undefined
     const active = settings
-    if (active === undefined || requested?.behavior !== 'smooth') return shipped.apply(this, args)
+    if (active === undefined || requested?.behavior !== 'smooth') return shipped.scrollIntoView.apply(this, args)
     const jump: ScrollIntoViewOptions = { ...requested, behavior: 'instant' }
     // Reduced motion turns a smooth reveal into the jump it would have been.
-    if (wantsInstant()) return shipped.call(this, jump)
+    if (wantsInstant()) return shipped.scrollIntoView.call(this, jump)
     const tracked = containers(this)
+    // Shadow before the jump: its own end must not reach a consumer that is about
+    // to be told the run finished.
+    for (const element of tracked) hold(element)
     const before = tracked.map(element => ({ top: element.scrollTop, left: element.scrollLeft }))
-    shipped.call(this, jump)
+    shipped.scrollIntoView.call(this, jump)
     const legs: Leg[] = []
     for (let index = 0; index < tracked.length; index += 1) {
       const element = tracked[index]
@@ -352,13 +447,120 @@ export function createScrollMotion(): {
       element.scrollLeft = origin.left
       const moved = Math.abs(landed.top - origin.top) > MOTION_EPSILON
         || Math.abs(landed.left - origin.left) > MOTION_EPSILON
-      if (!moved) continue
+      if (!moved) {
+        // Nothing moved here, so the browser would have raised no end either.
+        release(element, false)
+        continue
+      }
       legs.push({ element, fromTop: origin.top, fromLeft: origin.left, toTop: landed.top, toLeft: landed.left })
     }
     // The native call resolves even when nothing moved, so `await` never sees a
     // different contract here than it does without this layer.
     if (legs.length === 0) return Promise.resolve()
     return new Promise<void>(resolve => { start(legs, resolve) })
+  }
+
+  /**
+   * Read either calling convention into absolute offsets.
+   * @param options - the options object or the legacy x argument.
+   * @param y - the legacy y argument.
+   * @param base - the origin the request is resolved against.
+   * @returns the resolved offsets; `undefined` leaves that axis alone.
+   */
+  function readOffsets(
+    options: ScrollToOptions | number | undefined,
+    y: number | undefined,
+    base: { top: number; left: number },
+  ): { top: number | undefined; left: number | undefined } {
+    if (typeof options === 'number') {
+      return { left: base.left + options, top: y === undefined ? undefined : base.top + y }
+    }
+    if (options === undefined || options === null) return { top: undefined, left: undefined }
+    return {
+      left: options.left === undefined ? undefined : base.left + options.left,
+      top: options.top === undefined ? undefined : base.top + options.top,
+    }
+  }
+
+  /**
+   * Turn an offset request into a single leg, or nothing when it would not move.
+   * @param element - the container.
+   * @param top - requested top offset, or undefined to keep it.
+   * @param left - requested left offset, or undefined to keep it.
+   * @returns the leg, or undefined.
+   */
+  function legFor(element: ElementLike, top: number | undefined, left: number | undefined): Leg | undefined {
+    const max = maxima(element)
+    const toTop = top === undefined ? element.scrollTop : Math.min(max.top, Math.max(0, top))
+    const toLeft = left === undefined ? element.scrollLeft : Math.min(max.left, Math.max(0, left))
+    if (Math.abs(toTop - element.scrollTop) < MOTION_EPSILON
+      && Math.abs(toLeft - element.scrollLeft) < MOTION_EPSILON) return undefined
+    return { element, fromTop: element.scrollTop, fromLeft: element.scrollLeft, toTop, toLeft }
+  }
+
+  /**
+   * Shared body of the patched `scrollTo` and `scrollBy`.
+   * @param element - the receiver.
+   * @param args - the caller's arguments.
+   * @param shippedMethod - the method to defer to.
+   * @param relative - whether offsets are resolved against the current position.
+   * @returns the promise the native call would have returned.
+   */
+  function patchedOffset(
+    element: ElementLike,
+    args: unknown[],
+    shippedMethod: (this: ElementLike, ...rest: unknown[]) => Promise<void> | undefined,
+    relative: boolean,
+  ): Promise<void> | undefined {
+    const options = args[0] as ScrollToOptions | number | undefined
+    const behavior = typeof options === 'object' && options !== null ? options.behavior : undefined
+    const active = settings
+    if (active === undefined || behavior !== 'smooth') return shippedMethod.apply(element, args)
+    if (wantsInstant()) return shippedMethod.apply(element, args)
+    // A controller chasing a moving floor owns this container: its run would be
+    // restarted every frame and its curve would never play.
+    if (isRetarget(element)) {
+      // Drop our run silently — the native scroll about to start raises its own end.
+      cancel(false)
+      return shippedMethod.apply(element, args)
+    }
+    const base = relative
+      ? { top: element.scrollTop, left: element.scrollLeft }
+      : { top: 0, left: 0 }
+    const request = readOffsets(options, args[1] as number | undefined, base)
+    const leg = legFor(element, request.top, request.left)
+    // A request that changes nothing still resolves, like the native call.
+    if (leg === undefined) return Promise.resolve()
+    return new Promise<void>(resolve => { start([leg], resolve) })
+  }
+
+  /** The patched `scrollTo`. */
+  function scrollTo(this: ElementLike, ...args: unknown[]): Promise<void> | undefined {
+    return patchedOffset(this, args, shipped.scrollTo, false)
+  }
+
+  /** The patched `scrollBy`. */
+  function scrollBy(this: ElementLike, ...args: unknown[]): Promise<void> | undefined {
+    return patchedOffset(this, args, shipped.scrollBy, true)
+  }
+
+  /**
+   * Withhold the real end of a scroll this layer is animating, so a consumer sees
+   * the single end a native smooth scroll would have produced.
+   * @param event - a `scrollend` event.
+   */
+  function onScrollEnd(event: EventLike): void {
+    if (dispatching) return
+    const target = event.target as unknown as ElementLike | null
+    if (target === null) return
+    const until = shadowed.get(target)
+    if (until === undefined) return
+    if (until !== Number.POSITIVE_INFINITY && performance.now() > until) {
+      // The grace window has passed: this end belongs to whatever scrolled next.
+      shadowed.delete(target)
+      return
+    }
+    event.stopImmediatePropagation()
   }
 
   /**
@@ -379,28 +581,38 @@ export function createScrollMotion(): {
     }
     // A wheel or touch only means "the reader took this container" when it lands
     // on a container this run is moving; one over a side panel is somebody else's
-    // scrollport and must not stop the reveal.
+    // scrollport and must not stop the run.
     const target = event.target
     if (target === null || !active.legs.some(leg => leg.element.contains(target))) return
     cancel()
   }
 
-  /** Install the patch and the takeover listeners. */
+  /** Install the patches and the listeners. */
   function install(): void {
     if (installed) return
     installed = true
-    ;(Element.prototype as unknown as Record<string, unknown>).scrollIntoView = scrollIntoView
+    const prototype = Element.prototype as unknown as Record<string, unknown>
+    prototype.scrollTo = scrollTo
+    prototype.scrollBy = scrollBy
+    prototype.scrollIntoView = scrollIntoView
+    // Capture on the window reaches the scroller before any listener the consumer
+    // registered, whether it listens on the element or on the window.
+    window.addEventListener('scrollend', onScrollEnd, true)
     for (const kind of TAKEOVER_EVENTS) {
       window.addEventListener(kind, onTakeover, { capture: true, passive: true })
     }
   }
 
-  /** Remove the patch and the listeners, and stop any run in flight. */
+  /** Remove the patches and the listeners, and stop any run in flight. */
   function uninstall(): void {
-    cancel()
+    cancel(false)
     if (!installed) return
     installed = false
-    ;(Element.prototype as unknown as Record<string, unknown>).scrollIntoView = shipped
+    const prototype = Element.prototype as unknown as Record<string, unknown>
+    prototype.scrollTo = shipped.scrollTo
+    prototype.scrollBy = shipped.scrollBy
+    prototype.scrollIntoView = shipped.scrollIntoView
+    window.removeEventListener('scrollend', onScrollEnd, true)
     for (const kind of TAKEOVER_EVENTS) {
       window.removeEventListener(kind, onTakeover, true)
     }

@@ -92,7 +92,7 @@ export const Config = z.object({
   motionSpatialSplit: z.boolean().default(true).volatile(),
   motionQuantize: z.boolean().default(false).volatile(),
   motionReduced: z.string().pattern(MOTION_REDUCED).default('system').volatile(),
-  motionScroll: z.boolean().default(false).volatile(),
+  motionScroll: z.boolean().default(true).volatile(),
 })
 
 /** Resolved configuration: each field is a live getter. */
