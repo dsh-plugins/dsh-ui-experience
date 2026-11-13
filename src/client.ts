@@ -47,8 +47,8 @@ declare const window: {
   }
   matchMedia(query: string): {
     readonly matches: boolean
-    addEventListener?(kind: 'change', listener: () => void): void
-    removeEventListener?(kind: 'change', listener: () => void): void
+    addEventListener(kind: 'change', listener: () => void): void
+    removeEventListener(kind: 'change', listener: () => void): void
   }
 }
 
@@ -72,8 +72,8 @@ function watchReduced(report: (next: boolean) => void): () => void {
   const media = window.matchMedia(REDUCED_QUERY)
   const listener = (): void => { report(media.matches) }
   report(media.matches)
-  media.addEventListener?.('change', listener)
-  return () => { media.removeEventListener?.('change', listener) }
+  media.addEventListener('change', listener)
+  return () => { media.removeEventListener('change', listener) }
 }
 
 /** Host half's Remote namespace, typed against the shared protocol. */
@@ -903,10 +903,10 @@ function registerClient(): void {
             { value: 'm3', label: tr('motion.mode-m3') },
             { value: 'm3e', label: tr('motion.mode-m3e') },
           ]
-          // The schema accepts 0.5–2 while the row offers four steps. A value set
-          // by hand in the patch file is added to the ladder rather than being
-          // silently unreachable: without it the indicator would sit on the first
-          // segment with nothing selected, and picking 1× would overwrite it.
+          // The schema accepts any value in 0.5–2 while the row offers six steps. A
+          // value set by hand in the patch file is added to the ladder rather than
+          // being silently unreachable: without it the indicator would sit on the
+          // first segment with nothing selected, and picking 1× would overwrite it.
           const ladder = [0.5, 0.75, 1, 1.25, 1.5, 2]
           if (!ladder.includes(current.durationScale)) ladder.push(current.durationScale)
           ladder.sort((left, right) => left - right)

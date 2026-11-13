@@ -121,7 +121,18 @@ declare const window: {
   getComputedStyle(element: unknown): { getPropertyValue(name: string): string }
 }
 
-declare const MutationObserver: new (callback: () => void) => {
+/** One node an observed mutation added. */
+interface MutationNodeLike {
+  nodeName?: string
+  querySelectorAll?(selectors: string): { readonly length: number }
+}
+
+/** One recorded mutation, reduced to what this layer reacts to. */
+interface MutationRecordLike {
+  addedNodes: { readonly length: number; readonly [index: number]: MutationNodeLike | undefined }
+}
+
+declare const MutationObserver: new (callback: (records: readonly MutationRecordLike[]) => void) => {
   observe(target: unknown, options: { childList: boolean; subtree: boolean }): void
   disconnect(): void
 }
@@ -140,9 +151,13 @@ export interface MotionRuntime {
    * ones already rewritten.
    */
   refresh(): void
-  /** Put every rewritten declaration back exactly as it was authored. */
+  /**
+   * Undo every page-level change and stop following the page: declarations,
+   * duration tokens, the still-page sheet, the preference listener, and the
+   * observer.
+   */
   restore(): void
-  /** Restore and drop the observers. */
+  /** Same as `restore`; the name marks the bundle's unmount path. */
   dispose(): void
 }
 
@@ -153,11 +168,6 @@ export interface MotionRuntime {
 export function createMotion(): MotionRuntime {
   /** Every declaration block this layer has written, keyed by its rule. */
   const patches = new Map<RuleLike, Patch>()
-  /** Shipped value of each duration token, read from the page the first time this
-   *  layer scales it. Cached because the computed value is read back scaled as
-   *  soon as the inline override is in place, and re-reading it would compound
-   *  the multiplier on every later pass. */
-  const durationBase = new Map<string, number>()
   /** Sheets already reported as unreadable, so the log gets one line each. */
   const unreadable = new Set<string>()
   const media = window.matchMedia('(prefers-reduced-motion: reduce)')
@@ -358,15 +368,13 @@ export function createMotion(): MotionRuntime {
     for (const token of DURATION_TOKENS) {
       // Read from the page rather than assuming 200/100/300ms: DSH owns these
       // tokens, and a release that retunes them must not be scaled from a number
-      // this layer remembered from an older one.
-      let base = durationBase.get(token)
+      // this layer remembered from an older one. The read happens after every
+      // earlier override was cleared, so the value is the shipped one and cannot
+      // compound across repeated applies.
+      const base = parseDurationMs(computed.getPropertyValue(token).trim())
       if (base === undefined) {
-        base = parseDurationMs(computed.getPropertyValue(token).trim())
-        if (base === undefined) {
-          console.error(`ui-experience: motion cannot read ${token}; durations using it keep their shipped value`)
-          continue
-        }
-        durationBase.set(token, base)
+        console.error(`ui-experience: motion cannot read ${token}; durations using it keep their shipped value`)
+        continue
       }
       root.style.setProperty(token, `${Math.round(base * active.durationScale)}ms`)
     }
@@ -412,9 +420,13 @@ export function createMotion(): MotionRuntime {
   function realize(): void {
     const active = settings
     if (active === undefined || active.mode === 'off') return
-    const want = wantsReduced()
-    setReducedSheet(want)
-    if (want) {
+    if (wantsReduced()) {
+      // The observer is dropped *before* the still-page sheet is appended: that
+      // insertion is itself a childList mutation, and a scan scheduled by it would
+      // rewrite the declarations the restore below just put back.
+      observer?.disconnect()
+      observer = undefined
+      setReducedSheet(true)
       // Every duration is forced to 1ms under the still-page policy, so rewritten
       // curves would be invisible work. Undoing them here means lifting the policy
       // is a plain rescan against the authored declarations.
@@ -422,6 +434,7 @@ export function createMotion(): MotionRuntime {
       clearDurationTokens()
       return
     }
+    setReducedSheet(false)
     applyDurationTokens()
     scan()
     observer ??= observeDocument()
@@ -441,6 +454,21 @@ export function createMotion(): MotionRuntime {
   }
 
   /**
+   * Whether one added node brings a stylesheet with it: the node itself, or —
+   * for a wrapper element a bundle appended in one go — anything inside it.
+   * @param node - the added node.
+   * @returns whether a rescan is warranted.
+   */
+  function bringsStylesheet(node: MutationNodeLike | undefined): boolean {
+    if (node === undefined) return false
+    const name = node.nodeName?.toUpperCase()
+    if (name === 'STYLE' || name === 'LINK') return true
+    // A chat message re-renders thousands of nodes per streamed token; rescanning
+    // every stylesheet for those would turn a one-off cost into a per-frame one.
+    return (node.querySelectorAll?.('style,link')?.length ?? 0) > 0
+  }
+
+  /**
    * Watch for stylesheets that appear after the first scan. A client plugin
    * bundle mounts on its own schedule and appends a `<style>` long after this
    * one; without the observer its rows would keep the shipped curves until the
@@ -448,7 +476,16 @@ export function createMotion(): MotionRuntime {
    * @returns the observer handle.
    */
   function observeDocument(): { disconnect(): void } {
-    const instance = new MutationObserver(() => { refresh() })
+    const instance = new MutationObserver((records) => {
+      for (const record of records) {
+        for (let index = 0; index < record.addedNodes.length; index += 1) {
+          if (bringsStylesheet(record.addedNodes[index])) {
+            refresh()
+            return
+          }
+        }
+      }
+    })
     // `head` covers a bundle that appends a `<style>`; `body` covers one that
     // appends it next to its own slot instead. `adoptedStyleSheets` is not a DOM
     // mutation at all, so it is only picked up by the scan in `realize`.
