@@ -45,11 +45,11 @@ const LAST_ATTRIBUTE = 'data-dsh-uix-last'
 /** Remembers how wide that text was, so an append knows where to start. */
 const WIDTH_ATTRIBUTE = 'data-dsh-uix-width'
 
-/** How long a label's appended text takes to arrive, before the configured scale. */
-const APPEND_BASE_MS = 260
-
 /** Marks a row this layer is unveiling after it was inserted. */
 const ENTER_ATTRIBUTE = 'data-dsh-uix-enter'
+
+/** Marks a label that is currently rising into place. */
+const ROLL_ATTRIBUTE = 'data-dsh-uix-rolling'
 
 /**
  * Rows the transcript appends while it is following its tail.
@@ -122,8 +122,20 @@ const ONE_LINE_PX = 24
 /** Height of the mask's trailing fade, in line heights. */
 const FADE_BAND = 0.45
 
-/** Steepest tilt allowed, so a very narrow box does not become a vertical wipe. */
-const MAX_TILT_DEG = 30
+/**
+ * How tall an element may be, in line heights, and still count as a single line.
+ *
+ * A reveal boundary travels down the element, so a surface with only one line has
+ * nowhere to travel: the tilted line sits inside that line for the whole run, which
+ * paints a fade at a fixed fraction of the width instead of unveiling anything.
+ */
+const SINGLE_LINE_RATIO = 1.5
+
+/** Shallowest the reveal line may run, in degrees off horizontal. */
+const MIN_TILT_DEG = 15
+
+/** Steepest the reveal line may run, so a very narrow box does not become a vertical wipe. */
+const MAX_TILT_DEG = 45
 
 /** One element's reveal state. */
 interface Reveal {
@@ -169,8 +181,9 @@ const STREAM_CSS = `
 }
 
 /* The mask is a tilted reveal line with a soft trailing edge, so text arrives out
-   of a gradient rather than at a hard boundary. The tilt makes it fall one line
-   height across the width, which is what gives character granularity. */
+   of a gradient rather than at a hard boundary. The tilt is held inside 15deg-45deg
+   off horizontal, which is what makes the edge read as a diagonal wipe; any
+   shallower and it looks like a flat line across the block. */
 [${STREAM_ATTRIBUTE}="reveal"] {
   --dsh-uix-reveal: 0px;
   mask-image: linear-gradient(
@@ -202,10 +215,22 @@ const STREAM_CSS = `
   );
 }
 
+/* A TextShimmer root draws a second, inert copy of its children and sweeps a band of
+   light through it — the application's own idle shimmer. This layer moves a mask over
+   the readable copy instead, so the two would run at once: a band of light crossing a
+   line whose text is also being uncovered, which reads as two animations fighting.
+
+   The decorative copy is always the second child, and only exists while the label is
+   active, so this matches nothing on an idle one. */
+[${STREAM_ATTRIBUTE}="append"][data-shimmer] > :nth-child(2),
+[${STREAM_ATTRIBUTE}="append"] [data-shimmer] > :nth-child(2) {
+  display: none;
+}
+
 /* A label arrives as a whole line and rises into place; only later growth is swept,
    so arrival and extension read differently. */
-[${STREAM_ATTRIBUTE}="append"][data-shimmer][data-dsh-uix-rolling] > :first-child,
-[${STREAM_ATTRIBUTE}="append"][data-streaming]:not([data-shimmer])[data-dsh-uix-rolling] {
+[${STREAM_ATTRIBUTE}="append"][data-shimmer][${ROLL_ATTRIBUTE}] > :first-child,
+[${STREAM_ATTRIBUTE}="append"][data-streaming]:not([data-shimmer])[${ROLL_ATTRIBUTE}] {
   animation: dsh-uix-arrive var(--dsh-uix-roll, 260ms) var(--dsh-uix-ease, ease) both;
 }
 
@@ -235,8 +260,8 @@ const STREAM_CSS = `
     animation: none;
   }
 
-  [${STREAM_ATTRIBUTE}="append"][data-shimmer][data-dsh-uix-rolling] > :first-child,
-  [${STREAM_ATTRIBUTE}="append"][data-streaming]:not([data-shimmer])[data-dsh-uix-rolling] {
+  [${STREAM_ATTRIBUTE}="append"][data-shimmer][${ROLL_ATTRIBUTE}] > :first-child,
+  [${STREAM_ATTRIBUTE}="append"][data-streaming]:not([data-shimmer])[${ROLL_ATTRIBUTE}] {
     animation: none;
   }
 
@@ -258,6 +283,7 @@ declare const window: {
     readonly whiteSpace: string
     readonly lineHeight: string
     readonly width: string
+    readonly maskImage: string
   }
 }
 
@@ -276,6 +302,7 @@ interface ElementLike {
   readonly clientHeight: number
   readonly clientWidth: number
   readonly firstElementChild: ElementLike | null
+  readonly children: { readonly length: number; [index: number]: ElementLike }
   getBoundingClientRect(): { left: number; right: number; width: number }
   readonly parentElement: ElementLike | null
   readonly style: {
@@ -321,7 +348,6 @@ export function createStreamMotion(): {
   let ease = ''
   let rollMs = 260
   let enterMs = ENTER_FALLBACK_MS
-  let appendMs = APPEND_BASE_MS
   let revealMinMs = 250
   let revealMaxMs = 1200
   /**
@@ -344,6 +370,47 @@ export function createStreamMotion(): {
   const sweeps = new WeakMap<ElementLike, number>()
 
   /**
+   * The mask a label carried before this layer first swept it.
+   *
+   * A label keeps its own mask for what it does at rest — the reasoning summary fades
+   * where the application clips it — and this layer's rule replaces that while the
+   * label is marked. Capturing it once lets the label go back to exactly that between
+   * arrivals.
+   */
+  const rests = new WeakMap<ElementLike, string>()
+
+  /**
+   * The content height each live element had when it was last looked at.
+   *
+   * An element can switch between being a label and being prose — a streaming reply
+   * starts as one line and wraps. The switch has to know where the text already on
+   * screen ends, which is the height from before this update, not the height after it.
+   */
+  const heights = new WeakMap<ElementLike, number>()
+
+  /**
+   * Run counter for a label's arrival, separate from {@link generation}.
+   *
+   * The arrival animation and the append sweep are two animations on the same line with
+   * independent lifetimes; sharing a counter let one retire the other.
+   */
+  const rolls = new WeakMap<ElementLike, number>()
+
+  /**
+   * What each label slot showed last time, keyed by parent element and child index.
+   *
+   * A label is not guaranteed to keep its DOM node: the process row is rebuilt whenever
+   * its title changes, so the element carrying the text is new on every update. Keying
+   * the remembered text on the element then made every update look like a brand-new
+   * label, which replayed the full arrival each time — the reader sees the whole line
+   * rise and fade in again for one more word.
+   *
+   * Keying it on the slot instead makes the update readable as what it is: the same line
+   * with more words, or a different line.
+   */
+  const slots = new WeakMap<ElementLike, Map<number, { text: string; width: number }>>()
+
+  /**
    * Take the next generation for an element.
    * @param element - the element about to animate.
    * @returns its new generation.
@@ -352,17 +419,6 @@ export function createStreamMotion(): {
     const next = (generation.get(element) ?? 0) + 1
     generation.set(element, next)
     return next
-  }
-
-  /**
-   * Clear one animation's marks, but only if it is still the newest.
-   * @param element - the element.
-   * @param run - the generation the clearance belongs to.
-   * @param attributes - attributes to remove.
-   */
-  function retire(element: ElementLike, run: number, attributes: readonly string[]): void {
-    if (generation.get(element) !== run) return
-    for (const attribute of attributes) element.removeAttribute(attribute)
   }
 
   /** Whether the current policy asks for no motion at all. */
@@ -374,53 +430,89 @@ export function createStreamMotion(): {
   }
 
   /**
+   * An element's computed line height, with the body default as the fallback.
+   * @param element - the element to measure.
+   * @returns its line height in pixels.
+   */
+  function lineHeightOf(element: ElementLike): number {
+    const lineHeight = Number.parseFloat(window.getComputedStyle(element).lineHeight)
+    return Number.isFinite(lineHeight) && lineHeight > 0 ? lineHeight : 24
+  }
+
+  /**
+   * Whether an element is a one-line surface rather than multi-line prose.
+   * @param element - the live element.
+   * @returns whether it holds a single line of text.
+   */
+  function singleLine(element: ElementLike): boolean {
+    return element.scrollHeight <= lineHeightOf(element) * SINGLE_LINE_RATIO
+  }
+
+  /**
    * Whether an element is a one-line label rather than the transcript body.
    *
    * A `data-streaming` element is a label when it is `nowrap` — the reasoning
-   * summary — and the body otherwise.
+   * summary — and when it is only one line tall, which is where a streaming block
+   * starts out. That second test is what a one-line body needs: it is not prose that
+   * can be uncovered from the top down, and treating it as prose left the boundary
+   * parked inside its only line.
    *
-   * Height cannot be used: a body sizes itself to its content, so its scroll height
-   * equals its client height exactly like a one-line label's does.
+   * Height cannot be used for the multi-line case alone: a body sizes itself to its
+   * content, so its scroll height equals its client height exactly like a one-line
+   * label's does.
    *
    * @param element - the live element.
    * @returns the mode for this element.
    */
   function modeOf(element: ElementLike): Mode {
     if (element.hasAttribute('data-shimmer')) return 'append'
-    return window.getComputedStyle(element).whiteSpace === 'nowrap' ? 'append' : 'reveal'
+    if (window.getComputedStyle(element).whiteSpace === 'nowrap') return 'append'
+    return singleLine(element) ? 'append' : 'reveal'
   }
 
   /**
-   * The tilt that makes the reveal line fall one line height across the element's
-   * width. With that tilt, the boundary sweeps a line left to right exactly while
-   * it descends by one line, which is what turns a line-at-a-time reveal into a
-   * character-at-a-time one.
+   * The tilt of the reveal line, and the trigonometry the mask needs.
+   *
+   * The slanted edge is what turns a line-at-a-time reveal into a character-at-a-time
+   * one: while the boundary descends by the span, it sweeps the element from one side
+   * to the other, so characters inside a line appear left to right.
+   *
+   * The natural span is one line height, which on a wide column is a slant of under
+   * two degrees: the edge reads as a flat line and the per-character sweep is invisible.
+   * The slant is therefore held inside a range where the wipe is plainly diagonal.
+   *
    * @param element - the element being revealed.
    * @param lineHeight - its computed line height in pixels.
-   * @returns the CSS gradient angle.
+   * @returns the CSS gradient angle and the sine and cosine of its slant.
    */
-  function tiltFor(element: ElementLike, lineHeight: number): string {
+  function tiltFor(element: ElementLike, lineHeight: number): { angle: string; sin: number; cos: number } {
     const width = element.clientWidth
-    if (width <= 0 || lineHeight <= 0) return '180deg'
-    const ratio = Math.min(1, lineHeight / width)
-    const tilt = Math.asin(ratio) * 180 / Math.PI
-    return `${180 - Math.min(MAX_TILT_DEG, tilt)}deg`
+    if (width <= 0 || lineHeight <= 0) return { angle: '180deg', sin: 0, cos: 1 }
+    const natural = Math.atan(lineHeight / width) * 180 / Math.PI
+    const slant = Math.min(MAX_TILT_DEG, Math.max(MIN_TILT_DEG, natural)) * Math.PI / 180
+    return {
+      angle: `${180 - slant * 180 / Math.PI}deg`,
+      sin: Math.sin(slant),
+      cos: Math.cos(slant),
+    }
   }
 
   /**
-   * The reveal position at which an element is fully painted. The mask line is
-   * tilted, so the far corner is one line height beyond the content height.
+   * How far the mask has to travel for a box of the given height to be painted.
+   *
+   * The gradient runs at an angle, so its parameter is `x·sin + y·cos` and the last
+   * point painted is the bottom-right corner — not the bottom edge. Getting this wrong
+   * leaves a permanent fade over the right end of the final line, which on a short
+   * message is the whole visible block.
+   *
    * @param element - the element being revealed.
-   * @param lineHeight - its computed line height in pixels.
-   * @returns the terminal reveal position in pixels.
+   * @param tilt - its mask geometry.
+   * @param height - content height to measure, in pixels.
+   * @param lineHeight - its computed line height in pixels, for the trailing band.
+   * @returns the mask position at which that content is fully painted.
    */
-  function terminal(element: ElementLike, lineHeight: number): number {
-    // The boundary sits at the content edge; the trailing band fades over FADE_BAND
-    // line heights above it. Everything below the boundary is hidden, so a line that
-    // has just arrived is uncovered from its top down as the boundary descends — and
-    // the resting position has to clear the band, or the last line would stay partly
-    // transparent forever.
-    return element.scrollHeight + lineHeight * FADE_BAND
+  function front(element: ElementLike, tilt: { sin: number; cos: number }, height: number, lineHeight: number): number {
+    return tilt.sin * Math.max(0, element.clientWidth) + tilt.cos * height + lineHeight * FADE_BAND
   }
 
   /**
@@ -505,15 +597,74 @@ export function createStreamMotion(): {
   }
 
   /**
+   * The slot an element occupies: its parent and its index among that parent's
+   * children.
+   * @param element - the element.
+   * @returns its slot, or null when it has no parent.
+   */
+  function slotOf(element: ElementLike): { parent: ElementLike; index: number } | null {
+    const parent = element.parentElement
+    if (parent === null) return null
+    const children = parent.children
+    for (let index = 0; index < children.length; index += 1) {
+      if (children[index] === element) return { parent, index }
+    }
+    return null
+  }
+
+  /**
+   * What a label slot showed last time.
+   * @param slot - the slot, or null.
+   * @returns the remembered text and width, or undefined for a slot never seen.
+   */
+  function readSlot(slot: { parent: ElementLike; index: number } | null): { text: string; width: number } | undefined {
+    if (slot === null) return undefined
+    return slots.get(slot.parent)?.get(slot.index)
+  }
+
+  /**
+   * Remember what a label slot now shows.
+   * @param slot - the slot, or null.
+   * @param text - the label's text.
+   * @param width - its rendered width in pixels.
+   */
+  function writeSlot(slot: { parent: ElementLike; index: number } | null, text: string, width: number): void {
+    if (slot === null) return
+    let entries = slots.get(slot.parent)
+    if (entries === undefined) {
+      entries = new Map()
+      slots.set(slot.parent, entries)
+    }
+    entries.set(slot.index, { text, width })
+    // A slot only stops existing when the parent loses that many children, so dropping
+    // the entries past the end keeps this bounded without tracking removals.
+    const count = slot.parent.children.length
+    for (const index of entries.keys()) {
+      if (index >= count) entries.delete(index)
+    }
+  }
+
+  /**
    * Slide a step label up into place as it arrives.
+   *
+   * The arrival and the growth that follows are two different readings of the same
+   * line, and they belong to different clocks: the rise is the row appearing, the
+   * sweep is its text arriving. Sharing one run counter meant the first chunk of text
+   * retired the rise before it had played — under fast output the label was cut off
+   * part-way up and only the sweep was left, which reads as the rise having been
+   * removed. Its own counter lets it finish.
+   *
    * @param element - the shimmer root.
    */
   function enterLabel(element: ElementLike): void {
-    const run = nextGeneration(element)
-    element.removeAttribute('data-dsh-uix-rolling')
+    const run = (rolls.get(element) ?? 0) + 1
+    rolls.set(element, run)
+    element.removeAttribute(ROLL_ATTRIBUTE)
     void element.scrollHeight
-    element.setAttribute('data-dsh-uix-rolling', '')
-    window.setTimeout(() => { retire(element, run, ['data-dsh-uix-rolling']) }, rollMs)
+    element.setAttribute(ROLL_ATTRIBUTE, '')
+    window.setTimeout(() => {
+      if (rolls.get(element) === run) element.removeAttribute(ROLL_ATTRIBUTE)
+    }, rollMs)
   }
 
   /**
@@ -540,8 +691,7 @@ export function createStreamMotion(): {
     element.setAttribute(WIDTH_ATTRIBUTE, String(full))
     if (full <= 1) {
       // Nothing measurable to sweep, so the label is simply shown whole.
-      target.style.removeProperty('--dsh-uix-edge')
-      target.style.removeProperty('transition')
+      rest(element, target)
       return
     }
     // Two different arrivals need two different sweeps.
@@ -560,11 +710,12 @@ export function createStreamMotion(): {
     // and a short one does not crawl — and every sweep is guaranteed to finish.
     const duration = revealDuration(gap)
     const run = nextGeneration(element)
-    element.removeAttribute('data-dsh-uix-rolling')
     // Only an extension may continue from where the edge already is: it is the same
     // line growing. A replacement always restarts, even mid-sweep, because the text
     // it would otherwise continue into is gone.
     const continuing = extending && (sweeps.get(element) ?? 0) > performance.now()
+    // The sweep needs the rule's own mask, so the resting one steps aside first.
+    target.style.removeProperty('mask-image')
     if (!continuing) {
       target.style.transition = 'none'
       target.style.setProperty('--dsh-uix-edge', `${start}px`)
@@ -576,9 +727,26 @@ export function createStreamMotion(): {
     window.setTimeout(() => {
       if (!owns(element, run)) return
       sweeps.delete(element)
-      target.style.setProperty('--dsh-uix-edge', '100000px')
-      target.style.removeProperty('transition')
+      rest(element, target)
     }, duration)
+  }
+
+  /**
+   * Put a label back into its resting mask.
+   *
+   * A label can carry a mask of its own — the reasoning summary fades its last few
+   * characters where the application clips it — and this layer's rule replaces it,
+   * which turned that soft edge into a hard cut. The mask that was there before the
+   * first sweep is captured and put back here, so an idle label looks exactly as the
+   * application draws it and only the arrival is ours.
+   *
+   * @param element - the label.
+   * @param target - the element that carries its mask.
+   */
+  function rest(element: ElementLike, target: ElementLike): void {
+    target.style.setProperty('mask-image', rests.get(element) ?? 'none')
+    target.style.removeProperty('--dsh-uix-edge')
+    target.style.removeProperty('transition')
   }
 
   /**
@@ -623,11 +791,10 @@ export function createStreamMotion(): {
   function advance(element: ElementLike, state: Reveal): void {
     const active = settings
     if (active === undefined) return
-    const computed = window.getComputedStyle(element)
-    const lineHeight = Number.parseFloat(computed.lineHeight)
-    const height = Number.isFinite(lineHeight) && lineHeight > 0 ? lineHeight : 24
-    element.style.setProperty('--dsh-uix-tilt', tiltFor(element, height))
-    state.target = terminal(element, height)
+    const height = lineHeightOf(element)
+    const tilt = tiltFor(element, height)
+    element.style.setProperty('--dsh-uix-tilt', tilt.angle)
+    state.target = front(element, tilt, element.scrollHeight, height)
     // A leg already in flight is left to finish on its own clock. It will see the new
     // target and start the next leg when it lands.
     //
@@ -700,6 +867,10 @@ export function createStreamMotion(): {
   function forget(element: ElementLike, immediately = false): void {
     const state = reveals.get(element)
     reveals.delete(element)
+    // Whatever this element is about to become, the timers of its previous life are
+    // stale. One of them puts a label back into its resting mask, which on a body that
+    // has just grown into prose would paint `mask-image: none` over the reveal.
+    nextGeneration(element)
     // Open the mask before removing it. Dropping the attribute while the boundary was
     // still mid-run snapped the last line to full colour in a single frame.
     if (state !== undefined && !immediately) {
@@ -708,7 +879,8 @@ export function createStreamMotion(): {
     element.removeAttribute(STREAM_ATTRIBUTE)
     element.removeAttribute(LAST_ATTRIBUTE)
     element.removeAttribute(WIDTH_ATTRIBUTE)
-    element.removeAttribute('data-dsh-uix-rolling')
+    element.removeAttribute(ROLL_ATTRIBUTE)
+    rolls.delete(element)
     const target = maskTarget(element)
     const clear = (): void => {
       element.style.removeProperty('--dsh-uix-reveal')
@@ -716,7 +888,9 @@ export function createStreamMotion(): {
       element.style.removeProperty('transition')
       target?.style.removeProperty('--dsh-uix-edge')
       target?.style.removeProperty('transition')
+      target?.style.removeProperty('mask-image')
     }
+    rests.delete(element)
     if (immediately || state === undefined) clear()
     else window.setTimeout(clear, revealMaxMs)
   }
@@ -745,18 +919,19 @@ export function createStreamMotion(): {
   }
 
   /**
-   * Whether this label is already covered by an ancestor this layer marks.
+   * Whether an element is already covered by an ancestor that owns the reveal.
    *
-   * The reasoning summary is a `nowrap` element that contains a `TextShimmer`, so
-   * both are live: marking each would animate the same line twice.
+   * A multi-line surface reveals its own content, so a live element inside it is part
+   * of that same run and must not be animated twice. A one-line surface reveals
+   * nothing — {@link modeOf} makes it a label — so it never owns its content.
    *
    * @param element - the candidate.
-   * @returns whether an ancestor is already marked.
+   * @returns whether an ancestor owns the reveal.
    */
   function covered(element: ElementLike): boolean {
     let node = element.parentElement
     while (node !== null) {
-      if (node.hasAttribute(STREAM_ATTRIBUTE)) return true
+      if (node.getAttribute(STREAM_ATTRIBUTE) === 'reveal') return true
       node = node.parentElement
     }
     return false
@@ -773,36 +948,99 @@ export function createStreamMotion(): {
     if (active === undefined || active.mode === 'off' || still()) return
     const live = document.querySelectorAll(LIVE)
     const seen = new Set<ElementLike>()
+    // Which live elements have a live element inside them. A one-line container — the
+    // block a streaming reasoning row starts as — is such a case: it is a label by
+    // {@link modeOf}, but the text that arrives is the row's own label, so the inner
+    // element is the surface that must unveil. Marking both would clip the same line
+    // twice, and marking only the container left the inner text with the application's
+    // static fade and no unveiling at all.
+    const containers = new Set<ElementLike>()
     for (let index = 0; index < live.length; index += 1) {
       const element = live[index]
-      if (element === undefined || covered(element)) continue
-      seen.add(element)
+      if (element === undefined) continue
+      for (let node = element.parentElement; node !== null; node = node.parentElement) {
+        containers.add(node)
+      }
+    }
+    for (let index = 0; index < live.length; index += 1) {
+      const element = live[index]
+      if (element === undefined) continue
+      const height = element.scrollHeight
+      const lineHeight = lineHeightOf(element)
+      // The height this element had last time it was looked at. A mode change needs it
+      // to know where the text already on screen ends.
+      const before = heights.get(element)
+      heights.set(element, height)
+      if (covered(element)) continue
       const mode = modeOf(element)
+      if (mode === 'append' && containers.has(element)) {
+        if (element.hasAttribute(STREAM_ATTRIBUTE)) forget(element, true)
+        continue
+      }
+      seen.add(element)
       const marked = element.getAttribute(STREAM_ATTRIBUTE)
       if (marked !== mode) {
         if (marked !== null) forget(element, true)
         if (mode === 'reveal') {
-          // A body first seen mid-stream already shows what arrived before this
-          // layer started watching; revealing that from zero would blank a message
-          // the reader is looking at.
-          const height = element.scrollHeight
-          reveals.set(element, { current: height, from: height, target: height, frame: 0, started: 0, duration: 0 })
+          const tilt = tiltFor(element, lineHeight)
+          const end = front(element, tilt, height, lineHeight)
+          // A surface first seen mid-stream already shows what arrived before this
+          // layer started watching, so it starts fully painted.
+          //
+          // A surface that just grew past one line is the other case. Its text was
+          // being swept as a label, so everything below where the block stood a moment
+          // ago is new, and only that may be unveiled. Starting any higher — the
+          // obvious `height - one line` — puts the boundary inside text the reader has
+          // already read: the last line loses its paint and is then uncovered a second
+          // time, while the arriving line plays its own unveiling. That is two
+          // unveilings at once, and the first of them reads as the previous line fading
+          // out.
+          const open = before === undefined
+            ? end
+            : Math.min(end, front(element, tilt, before, lineHeight))
+          reveals.set(element, { current: open, from: open, target: open, frame: 0, started: 0, duration: 0 })
+          // Write the position before the attribute makes the mask apply. The rule's
+          // own default is zero, which would paint one frame of an entirely hidden
+          // message between this mark and the first frame of the reveal.
+          element.style.setProperty('--dsh-uix-tilt', tilt.angle)
+          element.style.setProperty('--dsh-uix-reveal', `${open}px`)
         } else {
-          // Record what the label says now, then slide it in: the row arriving is the
-          // one moment worth animating vertically, and every later change is an
-          // append that must leave the row itself still.
-          element.setAttribute(LAST_ATTRIBUTE, labelText(element))
-          element.setAttribute(WIDTH_ATTRIBUTE, String(contentWidth(element)))
-          if (mode === 'append') enterLabel(element)
+          // The mask the label carries at rest is captured here, before this layer's
+          // rule starts applying to it.
+          const target = maskTarget(element)
+          if (target !== null) rests.set(element, window.getComputedStyle(target).maskImage)
         }
         element.setAttribute(STREAM_ATTRIBUTE, mode)
+        // Hand a label back to its own mask straight away. Its rule covers the whole
+        // width, so leaving it on until the first sweep would hard-clip the end of a
+        // label whose application draws a soft edge there.
+        const target = maskTarget(element)
+        if (mode === 'append' && target !== null) rest(element, target)
       }
       if (mode === 'reveal') continue
       const text = labelText(element)
-      const previous = element.getAttribute(LAST_ATTRIBUTE) ?? ''
-      if (previous === text) continue
-      const previousWidth = Number.parseFloat(element.getAttribute(WIDTH_ATTRIBUTE) ?? '0')
+      const width = contentWidth(element)
+      // Read the previous state from the slot, not from the element. The process row is
+      // rebuilt when its title changes, so the element is often new while the line it
+      // shows is the same one, a word longer.
+      const slot = slotOf(element)
+      const prior = readSlot(slot)
+      const previous = prior?.text ?? element.getAttribute(LAST_ATTRIBUTE) ?? ''
+      const previousWidth = prior?.width ?? Number.parseFloat(element.getAttribute(WIDTH_ATTRIBUTE) ?? '0')
+      if (text === previous) continue
+      writeSlot(slot, text, width)
       element.setAttribute(LAST_ATTRIBUTE, text)
+      element.setAttribute(WIDTH_ATTRIBUTE, String(width))
+      // Two kinds of change, two different animations.
+      //
+      // A line that keeps its beginning is the same line getting longer: only the new
+      // characters are uncovered, and the row itself must not move.
+      //
+      // A line with no shared beginning is a different line — the step moved on. That
+      // one rises from below the way a new row does, so the change of subject is
+      // visible rather than the whole line flashing to different text.
+      const extending = previous !== '' && text.startsWith(previous) && previousWidth > 0
+      if (!extending) enterLabel(element)
       append(element, previous, Number.isFinite(previousWidth) ? previousWidth : 0)
     }
     unveil()
@@ -888,7 +1126,6 @@ export function createStreamMotion(): {
     document.documentElement.style.removeProperty('--dsh-uix-ease')
     document.documentElement.style.removeProperty('--dsh-uix-roll')
     document.documentElement.style.removeProperty('--dsh-uix-enter')
-    document.documentElement.style.removeProperty('--dsh-uix-append-ms')
     const entering = document.querySelectorAll(`[${ENTER_ATTRIBUTE}]`)
     for (let index = 0; index < entering.length; index += 1) {
       entering[index]?.removeAttribute(ENTER_ATTRIBUTE)
@@ -917,9 +1154,6 @@ export function createStreamMotion(): {
       document.documentElement.style.setProperty('--dsh-uix-roll', `${rollMs}ms`)
       const scaledEnter = next.streamEnterMs * next.durationScale
       enterMs = next.quantize ? quantizeMs(scaledEnter) : scaledEnter
-      const scaledAppend = APPEND_BASE_MS * next.durationScale
-      appendMs = next.quantize ? quantizeMs(scaledAppend) : scaledAppend
-      document.documentElement.style.setProperty('--dsh-uix-append-ms', `${appendMs}ms`)
       revealMinMs = next.streamRevealMinMs
       revealMaxMs = next.streamRevealMaxMs
       document.documentElement.style.setProperty('--dsh-uix-enter', `${enterMs}ms`)
