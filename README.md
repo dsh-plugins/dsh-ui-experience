@@ -143,7 +143,9 @@ M3 那侧的分离要说明白：Material 3 的 `emphasized` 整体是两段首�
 
 ### 滚动
 
-`scroll-behavior: smooth` 与脚本调用的 `scrollTo({behavior:'smooth'})` 都不受 CSS 曲线控制——时长和曲线由浏览器定，CSS 读不到，JS 也拿不到。勾选「滚动使用同一曲线」后，本层接管 `scrollTo` / `scrollBy` / `scrollIntoView`，用脚本滚动把平滑滚动换成本页曲线。
+`scroll-behavior: smooth` 与脚本调用的 `scrollTo({behavior:'smooth'})` 都不受 CSS 曲线控制——时长和曲线由浏览器定，CSS 读不到，JS 也拿不到。勾选「滚动使用同一曲线」后（**默认开启**），本层接管 `scrollTo` / `scrollBy` / `scrollIntoView`，用脚本滚动把平滑滚动换成本页曲线，并同时遮蔽 `scrollend`。
+
+默认开启意味着每个用户都会拿到原型补丁与事件遮蔽。关掉即拆掉补丁、监听与遮蔽，在飞的滚动就地停止、兑现其 Promise，并把欠下的一次结束放行。
 
 #### 为什么需要连 scrollend 一起接管
 
@@ -288,7 +290,7 @@ pnpm test
 | `client.ts` | 浏览器半：设置行、页面级图层接线 |
 | `motion.ts` | CSSOM 遍历与曲线改写 |
 | `motion-plan.ts` | 纯函数：值列表切分、时长解析与重定时、属性分类、曲线选择与求值 |
-| `scroll.ts` | 脚本定位滚动 |
+| `scroll.ts` | 脚本平滑滚动与 `scrollend` 遮蔽 |
 | `styles.ts` | 设置行样式表 |
 | `shared.ts` | 两端共享的协议类型 |
 

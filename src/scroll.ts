@@ -105,6 +105,17 @@ interface Run {
   readonly done: Array<() => void>
 }
 
+/**
+ * One container's withholding state. `until: Infinity` means a run is moving it
+ * right now; otherwise it records where the run left it, so the end the browser
+ * still owes for that final write can be told apart from a later scroll's end.
+ */
+interface Shadow {
+  until: number
+  top: number
+  left: number
+}
+
 /** A minimal event face: the type, the target and, for keys, the key. */
 interface EventLike {
   readonly type: string
@@ -253,16 +264,17 @@ export function createScrollMotion(): {
    * long after the run ended", which covers the end the browser still owes for
    * the final position write.
    */
-  const shadowed = new WeakMap<ElementLike, number>()
+  const shadowed = new WeakMap<ElementLike, Shadow>()
   /** Set while this layer dispatches its own end, so it does not withhold it. */
   let dispatching = false
 
   /**
-   * How long the end the browser owes for a run's last write is withheld after
-   * the run finishes. That end lands within a frame or two; a native scroll
-   * started afterwards ends hundreds of milliseconds later, so it passes.
+   * How long the end the browser owes for a run's last write may take to arrive.
+   * That end follows the final position write by a frame or two; the deadline is
+   * only a backstop for a stalled main thread, and the position check below is
+   * what actually decides.
    */
-  const END_GRACE_MS = 120
+  const END_GRACE_MS = 400
 
   /**
    * Containers currently inside that grace window. A `WeakMap` cannot be walked,
@@ -279,11 +291,17 @@ export function createScrollMotion(): {
 
   /** Shadow one container for as long as a run is moving it. */
   function hold(element: ElementLike): void {
-    shadowed.set(element, Number.POSITIVE_INFINITY)
+    shadowed.set(element, { until: Number.POSITIVE_INFINITY, top: 0, left: 0 })
   }
 
   /**
    * Release one container.
+   *
+   * The end the browser still owes for the final write is recognised by position,
+   * not by a fixed delay: it is the one that arrives while the container is still
+   * exactly where the run left it. A scroll that starts afterwards moves the
+   * container, and its end is let through no matter how soon it arrives.
+   *
    * @param element - the container a run has stopped moving.
    * @param notify - whether to hand its consumer the single end the run owes. A
    * run that is handing the container back to the browser must stay silent, since
@@ -291,12 +309,19 @@ export function createScrollMotion(): {
    */
   function release(element: ElementLike, notify: boolean): void {
     if (!shadowed.has(element)) return
-    shadowed.set(element, performance.now() + END_GRACE_MS)
+    shadowed.set(element, {
+      until: performance.now() + END_GRACE_MS,
+      top: element.scrollTop,
+      left: element.scrollLeft,
+    })
     graceful.add(element)
     if (!notify) return
     // Async so the position write that ended the run is visible to the listener,
     // the way it is when the browser raises the real event.
     queueMicrotask(() => {
+      // A run may have taken this container back between the release and now. It
+      // has not stopped, so it owes its consumer nothing yet.
+      if (shadowed.get(element)?.until === Number.POSITIVE_INFINITY) return
       dispatching = true
       try {
         element.dispatchEvent(new Event('scrollend'))
@@ -402,15 +427,19 @@ export function createScrollMotion(): {
    * @returns whether the request was folded in; false means the caller must start
    * a fresh run.
    */
-  function merge(leg: Leg, done: () => void): boolean {
+  function merge(legs: readonly Leg[], done: () => void): boolean {
     const active = run
-    if (active === undefined || active.legs.length !== 1) return false
-    const current = active.legs[0]
-    if (current === undefined || current.element !== leg.element) return false
-    active.legs = [leg]
+    if (active === undefined) return false
+    // Only a run moving exactly the same containers can absorb the request: a
+    // different container means a different scrollport with its own story.
+    if (active.legs.length !== legs.length) return false
+    for (let index = 0; index < legs.length; index += 1) {
+      if (active.legs[index]?.element !== legs[index]?.element) return false
+    }
+    active.legs = [...legs]
     active.started = performance.now()
-    active.duration = scrollDurationMs(scrollDistance([leg]), settings as MotionSettings)
-    active.written = [{ top: leg.element.scrollTop, left: leg.element.scrollLeft }]
+    active.duration = scrollDurationMs(scrollDistance(legs), settings as MotionSettings)
+    active.written = legs.map(leg => ({ top: leg.element.scrollTop, left: leg.element.scrollLeft }))
     active.done.push(done)
     return true
   }
@@ -465,7 +494,9 @@ export function createScrollMotion(): {
       const moved = Math.abs(landed.top - origin.top) > MOTION_EPSILON
         || Math.abs(landed.left - origin.left) > MOTION_EPSILON
       if (!moved) {
-        // Nothing moved here, so the browser would have raised no end either.
+        // A container a live run is still moving has not stopped; leave its shadow
+        // alone. Otherwise nothing moved here, so no end is owed.
+        if (run?.legs.some(leg => leg.element === element)) continue
         release(element, false)
         continue
       }
@@ -474,7 +505,13 @@ export function createScrollMotion(): {
     // The native call resolves even when nothing moved, so `await` never sees a
     // different contract here than it does without this layer.
     if (legs.length === 0) return Promise.resolve()
-    return new Promise<void>(resolve => { start(legs, resolve) })
+    // A reveal repeated on the same containers — a timeline dragged across rows,
+    // a chat that keeps re-revealing — re-aims the run in flight. Restarting it
+    // would reset the curve every call and owe its consumer an end every call,
+    // which is the per-frame end storm this layer exists to remove.
+    return new Promise<void>(resolve => {
+      if (!merge(legs, resolve)) start(legs, resolve)
+    })
   }
 
   /**
@@ -540,7 +577,7 @@ export function createScrollMotion(): {
     if (leg === undefined) return Promise.resolve()
     // One promise per caller, settled with whichever run finishes the travel.
     return new Promise<void>(resolve => {
-      if (!merge(leg, resolve)) start([leg], resolve)
+      if (!merge([leg], resolve)) start([leg], resolve)
     })
   }
 
@@ -555,18 +592,38 @@ export function createScrollMotion(): {
   }
 
   /**
+   * The element a scroll event is really about. A viewport scroll reports
+   * `document` as its target, while this layer holds the scrolling element it
+   * animated.
+   * @param target - the event's target.
+   * @returns the container to look up, or null.
+   */
+  function resolveTarget(target: EventTarget | null): ElementLike | null {
+    if (target === null) return null
+    return target as unknown as ElementLike
+  }
+
+  /**
    * Withhold the real end of a scroll this layer is animating, so a consumer sees
    * the single end a native smooth scroll would have produced.
    * @param event - a `scrollend` event.
    */
   function onScrollEnd(event: EventLike): void {
     if (dispatching) return
-    const target = event.target as unknown as ElementLike | null
+    const target = resolveTarget(event.target)
     if (target === null) return
-    const until = shadowed.get(target)
-    if (until === undefined) return
-    if (until !== Number.POSITIVE_INFINITY && performance.now() > until) {
-      // The grace window has passed: this end belongs to whatever scrolled next.
+    const entry = shadowed.get(target)
+    if (entry === undefined) return
+    if (entry.until === Number.POSITIVE_INFINITY) {
+      event.stopImmediatePropagation()
+      return
+    }
+    // An end owed for the run's final write arrives while the container is still
+    // where the run left it. Anything that moved it since belongs to a later
+    // scroll, and is released even inside the deadline.
+    const unmoved = Math.abs(target.scrollTop - entry.top) <= FOREIGN_TOLERANCE
+      && Math.abs(target.scrollLeft - entry.left) <= FOREIGN_TOLERANCE
+    if (!unmoved || performance.now() > entry.until) {
       shadowed.delete(target)
       graceful.delete(target)
       return
@@ -603,9 +660,31 @@ export function createScrollMotion(): {
     cancel()
   }
 
+  /**
+   * Whether the prototypes still hold this layer's own functions. A second
+   * instance, or a hot reload that installed a replacement before this one was
+   * uninstalled, leaves someone else's wrappers in place; writing back a captured
+   * `shipped` then would strand the page on a wrapper with no listener behind it.
+   * @returns whether every patched method is ours.
+   */
+  function ownsPatches(): boolean {
+    const prototype = Element.prototype as unknown as Record<string, unknown>
+    return prototype.scrollTo === scrollTo
+      && prototype.scrollBy === scrollBy
+      && prototype.scrollIntoView === scrollIntoView
+  }
+
   /** Install the patches and the listeners. */
   function install(): void {
     if (installed) return
+    const current = Element.prototype as unknown as Record<string, unknown>
+    if (current.scrollTo !== shipped.scrollTo || current.scrollIntoView !== shipped.scrollIntoView) {
+      // Reported rather than layered on top: patching a patched prototype would
+      // chain two layers and neither could restore the real methods.
+      console.error('ui-experience: scroll methods were already replaced when the motion layer started; '
+        + 'scripted scrolling is left off until the page reloads')
+      return
+    }
     installed = true
     const prototype = Element.prototype as unknown as Record<string, unknown>
     prototype.scrollTo = scrollTo
@@ -625,6 +704,11 @@ export function createScrollMotion(): {
     clearGrace()
     if (!installed) return
     installed = false
+    if (!ownsPatches()) {
+      console.error('ui-experience: the scroll methods were replaced while scripted scrolling was active; '
+        + 'leaving the current implementations in place instead of restoring stale ones')
+      return
+    }
     const prototype = Element.prototype as unknown as Record<string, unknown>
     prototype.scrollTo = shipped.scrollTo
     prototype.scrollBy = shipped.scrollBy
@@ -642,6 +726,9 @@ export function createScrollMotion(): {
       if (!next.scroll || next.mode === 'off') return
       install()
     },
-    restore: uninstall,
+    restore(): void {
+      uninstall()
+      settings = undefined
+    },
   }
 }

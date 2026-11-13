@@ -59,7 +59,8 @@ export interface MotionSettings {
   /** Whether rewritten durations snap onto the Material duration ladder. */
   quantize: boolean
   reduced: MotionReduced
-  /** Whether scripted smooth locating replaces the native `scrollIntoView`. */
+  /** Whether scripted smooth scrolling replaces the native one, and its end
+   *  events are shadowed so consumers see one end per gesture. */
   scroll: boolean
 }
 
