@@ -27,7 +27,7 @@
  */
 
 import { type MotionSettings } from './shared.ts'
-import { easeCurve, effectCurvePoints } from './motion-plan.ts'
+import { easeCurve, effectCurvePoints, quantizeMs } from './motion-plan.ts'
 
 /** `ScrollToOptions`, restated so the file needs no DOM lib. */
 interface ScrollToOptions {
@@ -144,7 +144,10 @@ export function scrollDistance(legs: readonly Leg[]): number {
  */
 export function scrollDurationMs(distance: number, settings: MotionSettings): number {
   const grown = MIN_MS + Math.max(0, distance - FREE_PX) * GROWTH_MS_PER_PX
-  return Math.min(MAX_MS, grown) * settings.durationScale
+  const scaled = Math.min(MAX_MS, grown) * settings.durationScale
+  // The ladder setting is about how every duration on the page is quantized; a
+  // scroll that ignored it would be the one animation off the grid.
+  return settings.quantize ? quantizeMs(scaled) : scaled
 }
 
 /**

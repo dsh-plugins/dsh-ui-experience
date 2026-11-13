@@ -170,7 +170,7 @@ export function parseDurationMs(value: string): number | undefined {
  * @param ms - duration in milliseconds.
  * @returns the closest ladder value.
  */
-function quantizeMs(ms: number): number {
+export function quantizeMs(ms: number): number {
   let best = MATERIAL_DURATIONS_MS[0] ?? 50
   let bestDistance = Number.POSITIVE_INFINITY
   for (const step of MATERIAL_DURATIONS_MS) {
