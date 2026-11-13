@@ -29,7 +29,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.json && node build.mjs",
     "typecheck": "tsc -p tsconfig.json",
-    "test": "node --test test/"
+    "test": "node --test \"test/**/*.test.mjs\""
   },
   "dependencies": {
     "@deepseek-ai/dsh-typert-protocol": "^0.2.2-rc.2",
