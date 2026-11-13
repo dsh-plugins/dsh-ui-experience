@@ -153,6 +153,11 @@ export interface MotionRuntime {
 export function createMotion(): MotionRuntime {
   /** Every declaration block this layer has written, keyed by its rule. */
   const patches = new Map<RuleLike, Patch>()
+  /** Shipped value of each duration token, read from the page the first time this
+   *  layer scales it. Cached because the computed value is read back scaled as
+   *  soon as the inline override is in place, and re-reading it would compound
+   *  the multiplier on every later pass. */
+  const durationBase = new Map<string, number>()
   /** Sheets already reported as unreadable, so the log gets one line each. */
   const unreadable = new Set<string>()
   const media = window.matchMedia('(prefers-reduced-motion: reduce)')
@@ -349,15 +354,19 @@ export function createMotion(): MotionRuntime {
     const active = settings
     if (active === undefined || active.durationScale === 1) return
     const root = document.documentElement
-    // The base value is read from the page rather than assumed: DSH owns those
-    // three tokens, and a release that retunes them must not be scaled from a
-    // number this layer remembered from an older one.
     const computed = window.getComputedStyle(root)
     for (const token of DURATION_TOKENS) {
-      const base = parseDurationMs(computed.getPropertyValue(token).trim())
+      // Read from the page rather than assuming 200/100/300ms: DSH owns these
+      // tokens, and a release that retunes them must not be scaled from a number
+      // this layer remembered from an older one.
+      let base = durationBase.get(token)
       if (base === undefined) {
-        console.error(`ui-experience: motion cannot read ${token}; durations using it keep their shipped value`)
-        continue
+        base = parseDurationMs(computed.getPropertyValue(token).trim())
+        if (base === undefined) {
+          console.error(`ui-experience: motion cannot read ${token}; durations using it keep their shipped value`)
+          continue
+        }
+        durationBase.set(token, base)
       }
       root.style.setProperty(token, `${Math.round(base * active.durationScale)}ms`)
     }
