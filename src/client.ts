@@ -315,6 +315,8 @@ function registerClient(): void {
         let lastRpcProblem = ''
         /** Last reported palette problem, for the same reason. */
         let lastPaletteProblem = ''
+        /** Set once the host reported no motion field, so the cause is logged once. */
+        let motionUnsupported = false
         /** Border width currently painted. */
         let paintedWidth = ''
         let disposeOverride: (() => void) | undefined
@@ -468,6 +470,16 @@ function registerClient(): void {
          * @param answer - the poll payload.
          */
         const adopt = (answer: PollResult): void => {
+          // The browser half reloads on a page refresh while the host half only
+          // changes on a process restart, so the two can be one build apart. A
+          // host without the motion field leaves the layer off rather than
+          // failing here; the reason is logged once instead of every poll.
+          const motionAnswer = answer.motion ?? MOTION_OFF
+          if (answer.motion === undefined && !motionUnsupported) {
+            motionUnsupported = true
+            console.error('ui-experience: this host build predates the motion settings; '
+              + 'the M3 motion row stays inert until DSH restarts')
+          }
           if (answer.paths.colors !== view.paths.colors
             || answer.paths.tokens !== view.paths.tokens
             || answer.borderWidth !== view.borderWidth) {
@@ -475,15 +487,15 @@ function registerClient(): void {
           }
           // The motion layer is independent of the palette switch, so it is
           // adopted before the palette branch and survives the palette teardown.
-          if (motionDiffers(view.motion, answer.motion)) {
-            publish({ motion: answer.motion })
-            if (bootstrapped) applyMotion(answer.motion)
+          if (motionDiffers(view.motion, motionAnswer)) {
+            publish({ motion: motionAnswer })
+            if (bootstrapped) applyMotion(motionAnswer)
           }
           if (!bootstrapped) {
             bootstrapped = true
             setBootAttribute(answer.active)
             publish({ active: answer.active })
-            applyMotion(answer.motion)
+            applyMotion(motionAnswer)
           } else if (!writing && view.active !== answer.active) {
             // The switch changed elsewhere (another tab, or a configuration
             // edit): follow it, in both directions.
