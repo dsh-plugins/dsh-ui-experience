@@ -237,15 +237,15 @@ const DICTS: Record<string, Record<string, string>> = {
     'motion.duration': '时长倍率',
     'motion.options': '高级选项',
     'motion.spatial-split': '位移与效果使用不同曲线',
-    'motion.spatial-split-hint': '位移曲线带过冲（快位移约 9%，默认位移约 1.4%），效果曲线没有。关闭后全部使用效果曲线。',
+    'motion.spatial-split-hint': '位移带过冲，效果不带；关闭后统一用效果曲线。',
     'motion.quantize': '时长对齐到 Material 档位',
-    'motion.quantize-hint': '把改写后的时长吸附到 50/100/150/200/250/300/350/400/450/500/550/600/700/800/900/1000ms。',
+    'motion.quantize-hint': '时长吸附到 50 至 1000ms 的 Material 档位。',
     'motion.stream': '流式文本渐进显现',
-    'motion.stream-hint': '正文与思考摘要在生成时逐段显现，而不是随每次分片一次跳出。做法是移动一条遮罩线而不是截断文字——文字从一开始就完整存在，选择、复制与读屏都不受影响；显现速度按积压量自适应，输出突发时追得快，输出缓慢时走得慢。',
+    'motion.stream-hint': '正文与思考摘要逐段显现；只移动遮罩，不截断文字。',
     'motion.scroll': '滚动使用同一曲线',
-    'motion.scroll-hint': '接管平滑滚动（轨迹行定位、插件卡片居中、会话检查器跳转、流式跟随），改用本页曲线；同一容器上的重复请求会被并入正在进行的滚动，不会每帧重来。脚本滚动会逐帧产生 scrollend，本插件同时屏蔽这些事件，只在落位或被取消时放行一次，因此依赖「滚动已停」判断的消费方看到的节奏与原生一致。读者一旦在容器上滚轮、触摸或按滚动键，脚本滚动立即停止并交还原生控制。',
+    'motion.scroll-hint': '平滑滚动、滚轮与定位跳转改用本页曲线。',
     'motion.reduced': '始终减弱动效',
-    'motion.reduced-hint': '开启后忽略系统的「减弱动态效果」偏好，一律把时长压到 1ms。关闭时跟随系统。',
+    'motion.reduced-hint': '忽略系统偏好，一律把时长压到 1ms。',
     'motion.system-reduced': '系统已请求减弱动效，本页动画正在被压制。',
     'motion.save-failed': '动效设置保存失败',
     'motion.inert': '曲线族为「关闭」，以下选项不会生效。',
@@ -271,15 +271,15 @@ const DICTS: Record<string, Record<string, string>> = {
     'motion.duration': 'Duration scale',
     'motion.options': 'Advanced options',
     'motion.spatial-split': 'Spatial and effects take different curves',
-    'motion.spatial-split-hint': 'The spatial curves overshoot (about 9% for the fast one, 1.4% for the default); the effects curve does not. Turning this off uses the effects curve everywhere.',
+    'motion.spatial-split-hint': 'Movement overshoots, effects do not; off uses the effects curve for both.',
     'motion.quantize': 'Snap durations to the Material ladder',
-    'motion.quantize-hint': 'Pull rewritten durations onto 50/100/150/200/250/300/350/400/450/500/550/600/700/800/900/1000 ms.',
+    'motion.quantize-hint': 'Snap durations onto the 50-1000 ms Material ladder.',
     'motion.stream': 'Progressive streamed text',
-    'motion.stream-hint': 'Reveal the transcript and the reasoning summary progressively instead of letting each chunk jump into place. The reveal moves a mask line rather than truncating text, so every character is in the DOM from the moment it arrives and selection, copying, and screen readers are unaffected. The speed follows the backlog: a burst catches up quickly, a trickle crawls.',
+    'motion.stream-hint': 'Reveal transcript and reasoning progressively; a mask moves, no text is cut.',
     'motion.scroll': 'Scroll on the same curve',
-    'motion.scroll-hint': 'Take over smooth scrolling — locating a trajectory row, centring a plugin card, jumping to a session-inspector node, following streamed output — and drive it on this page\'s curve; a repeat request on the same container re-aims the run in flight instead of starting over. Scripted scrolling ends once per frame, so this layer withholds those events and releases exactly one when the run lands or is cancelled; consumers that settle on \'scrolling stopped\' see the native rhythm. A wheel, touch, or scroll key over the container stops it at once.',
+    'motion.scroll-hint': 'Drive smooth scrolling, the wheel, and locating jumps on this page\'s curve.',
     'motion.reduced': 'Always reduce motion',
-    'motion.reduced-hint': 'Ignore the system reduce-motion preference and force every duration to 1 ms. Off follows the system.',
+    'motion.reduced-hint': 'Ignore the system preference and force every duration to 1 ms.',
     'motion.system-reduced': 'The system asked for reduced motion; this page is being held still.',
     'motion.save-failed': 'Failed to save the motion settings',
     'motion.inert': 'The curve family is Off, so these options have no effect.',
@@ -799,29 +799,35 @@ function registerClient(): void {
         }
 
         /**
-         * Checkbox row, mirroring the `Checkbox` primitive: a native input so the
-         * platform draws and keys it, tinted with the brand accent.
+         * Boolean option row, mirroring the General Settings developer-tools row:
+         * title and description in one column, the `Switch` control at the inline
+         * end. The switch is the same control the Matugen row above uses, so an
+         * option here and the row above it read as one surface rather than a native
+         * checkbox beside a themed toggle.
          * @param checked - current state.
          * @param set - receives the next state.
-         * @param label - the visible label.
-         * @param hint - optional explanation under the label.
-         * @param disabled - locks the box.
-         * @returns the label element.
+         * @param label - the row title, which is also the switch's accessible name.
+         * @param hint - one-line explanation under the title.
+         * @param disabled - locks the switch while a write is in flight.
+         * @returns the option row.
          */
-        const checkbox = (
+        const option = (
           checked: boolean, set: (next: boolean) => void,
           label: string, hint: string | undefined, disabled: boolean,
         ): unknown =>
-          h('label', { className: 'dsh-uix-check' },
-            h('input', {
-              type: 'checkbox',
-              checked,
+          h('div', { className: 'dsh-uix-option' },
+            h('div', { className: 'dsh-uix-option-text' },
+              h('div', { className: 'dsh-uix-option-title' }, label),
+              hint === undefined ? null : h('div', { className: 'dsh-uix-option-desc' }, hint)),
+            h('button', {
+              type: 'button',
+              role: 'switch',
+              'aria-checked': checked,
+              'aria-label': label,
               disabled,
-              onChange: (event: { target: { checked: boolean } }) => { set(event.target.checked) },
-            }),
-            h('span', { className: 'dsh-uix-check-text' },
-              h('span', { className: 'dsh-uix-check-label' }, label),
-              hint === undefined ? null : h('span', { className: 'dsh-uix-check-hint' }, hint)))
+              className: 'dsh-uix-switch',
+              onClick: () => { set(!checked) },
+            }, h('span', { className: 'dsh-uix-switch-thumb', 'aria-hidden': true })))
 
         /**
          * Switch row: its own setting cell, leaving the built-in rows untouched.
@@ -959,19 +965,19 @@ function registerClient(): void {
 
           const policy = open
             ? h('div', { className: 'dsh-uix-form' },
-              checkbox(current.spatialSplit,
+              option(current.spatialSplit,
                 next => { void saveMotion({ spatialSplit: next }) },
                 tr('motion.spatial-split'), tr('motion.spatial-split-hint'), locked),
-              checkbox(current.quantize,
+              option(current.quantize,
                 next => { void saveMotion({ quantize: next }) },
                 tr('motion.quantize'), tr('motion.quantize-hint'), locked),
-              streamUnsupported ? null : checkbox(current.stream,
+              streamUnsupported ? null : option(current.stream,
                 next => { void saveMotion({ stream: next }) },
                 tr('motion.stream'), tr('motion.stream-hint'), locked),
-              checkbox(current.scroll,
+              option(current.scroll,
                 next => { void saveMotion({ scroll: next }) },
                 tr('motion.scroll'), tr('motion.scroll-hint'), locked),
-              checkbox(current.reduced === 'always',
+              option(current.reduced === 'always',
                 next => { void saveMotion({ reduced: next ? 'always' : 'system' }) },
                 tr('motion.reduced'), tr('motion.reduced-hint'), locked),
             )

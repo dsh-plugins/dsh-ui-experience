@@ -104,14 +104,12 @@ export const ROW_CSS = `
 .dsh-uix-segment-tab:disabled{cursor:default;opacity:.4}
 .dsh-uix-segment-tab:focus-visible{outline:var(--dsw-focus-ring-width) solid var(--dsw-focus-ring-color,var(--dsw-alias-state-business-primary));outline-offset:-2px}
 
-/* Checkbox: Checkbox.module.css — a native input so the platform draws and keys
-   it, tinted with the brand accent, with the explanation stacked underneath. */
-.dsh-uix-check{display:flex;align-items:flex-start;gap:6px;padding:10px 0;font-size:14px;line-height:20px;color:var(--dsw-alias-label-primary);cursor:pointer}
-.dsh-uix-check+.dsh-uix-check{border-top:0.5px solid var(--dsw-alias-border-l2)}
-.dsh-uix-check input{flex:0 0 auto;width:16px;height:16px;margin:2px 0 0;accent-color:var(--dsw-alias-brand-primary);cursor:inherit}
-.dsh-uix-check input:focus-visible{outline:var(--dsw-focus-ring-width) solid var(--dsw-focus-ring-color,var(--dsw-alias-state-business-primary));outline-offset:2px}
-.dsh-uix-check:has(input:disabled){cursor:default;opacity:.5}
-.dsh-uix-check-text{display:flex;flex-direction:column;gap:2px;min-width:0}
-.dsh-uix-check-label{font-size:13px;font-weight:500;line-height:1.5;color:var(--dsw-alias-label-primary)}
-.dsh-uix-check-hint{font-size:12px;line-height:1.5;font-weight:400;color:var(--dsw-alias-label-tertiary)}
+/* Boolean option row: DeveloperToolsRow.module.css .row / .title / .description —
+   the title column takes the width, the switch sits at the inline end. The copied
+   Switch above is the same control, so an option row and the row above it match. */
+.dsh-uix-option{display:flex;align-items:center;justify-content:space-between;gap:24px;padding:12px 0}
+.dsh-uix-option+.dsh-uix-option{border-top:0.5px solid var(--dsw-alias-border-l2)}
+.dsh-uix-option-text{display:flex;flex-direction:column;gap:4px;min-width:0}
+.dsh-uix-option-title{font-size:13px;font-weight:500;line-height:1.5;color:var(--dsw-alias-label-primary)}
+.dsh-uix-option-desc{font-size:12px;line-height:1.5;color:var(--dsw-alias-label-secondary)}
 `

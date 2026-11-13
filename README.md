@@ -342,9 +342,11 @@ DSH 目前只有一处用到（提问卡片标题的溢出遮罩 `--question-cop
 | `.dsh-uix-reset` | `Button.module.css` `.outline` |
 | `.dsh-uix-switch` / `-thumb` | `Switch.module.css` `.switch` / `.thumb` |
 | `.dsh-uix-segment` / `-indicator` / `-tab` | `SegmentedControl.module.css` `.control` / `.indicator` / `.tab` |
-| `.dsh-uix-check` / `-label` / `-hint` | `Checkbox.module.css` `.checkbox` 及其原生输入 |
+| `.dsh-uix-option` / `-text` / `-title` / `-desc` | `DeveloperToolsRow.module.css` `.row` / `.title` / `.description` |
 
 所有颜色、圆角、焦点环都用 `--dsw-*` 主题 token，这些是跨版本稳定的公开契约；只有长度值（内距、尺寸、字号）可能随改版调整。升级 DSH 后，把上表的源文件与 `src/styles.ts` 对照一遍即可。
+
+布尔项一律用与上方行相同的开关（`Switch`），而不是原生复选框：设置页里「开发工具」一类布尔行就是「标题与说明左置、开关右对齐」，同一页混用两种控件会显得割裂。选项行的标题 13px/500、说明 12px 次级色，行间共用一条 0.5px 分隔线。
 
 ## 开发
 
