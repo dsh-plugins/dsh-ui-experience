@@ -33,13 +33,16 @@
  */
 
 import { type MotionSettings } from './shared.ts'
-import { effectCurvePoints, quantizeMs } from './motion-plan.ts'
+import { easeCurve, effectCurvePoints, quantizeMs } from './motion-plan.ts'
 
 /** The attribute this layer writes to mark what it is animating. */
 const STREAM_ATTRIBUTE = 'data-dsh-uix-stream'
 
 /** Remembers the text an element showed before its current update. */
 const LAST_ATTRIBUTE = 'data-dsh-uix-last'
+
+/** Remembers how wide that text was, so an append knows where to start. */
+const WIDTH_ATTRIBUTE = 'data-dsh-uix-width'
 
 /** Marks a row this layer is unveiling after it was inserted. */
 const ENTER_ATTRIBUTE = 'data-dsh-uix-enter'
@@ -80,15 +83,26 @@ const LIVE = '[data-streaming], [data-shimmer]'
  */
 const MIN_REVEAL_PX = 0.5
 
-/** Reveal transition bounds, in milliseconds. */
-const MIN_REVEAL_MS = 90
-const MAX_REVEAL_MS = 480
+/**
+ * Reveal duration for a backlog, in milliseconds.
+ *
+ * The exponent is what makes this catch up rather than crawl: duration grows more
+ * slowly than the distance, so the reveal speed — gap over duration — rises with
+ * the backlog. One line takes about 140 ms and stays readable; ten lines take about
+ * 350 ms and do not fall behind; a whole block landing at once is capped at 700 ms.
+ * A linear duration would hold one constant speed and let a burst fall arbitrarily
+ * far behind.
+ */
+const REVEAL_MIN_MS = 140
+const REVEAL_MAX_MS = 700
+const REVEAL_CURVE = 17.7
+const REVEAL_EXPONENT = 0.62
 
 /**
- * Reveal speed the duration is derived from, in CSS pixels per millisecond of
- * catch-up. Roughly one line every 40 ms reads as typing without feeling behind.
+ * How long a label's appended text takes to fade in, before the configured
+ * multiplier.
  */
-const REVEAL_PX_PER_MS = 0.55
+const APPEND_BASE_MS = 240
 
 /** How long a live label's roll takes before the configured multiplier. */
 const ROLL_BASE_MS = 260
@@ -98,10 +112,16 @@ const MAX_TILT_DEG = 30
 
 /** One element's reveal state. */
 interface Reveal {
-  /** Reveal position the element had when the last chunk landed. */
-  shown: number
+  /** Reveal position currently painted. */
+  current: number
+  /** Where the boundary started for the run in flight. */
+  from: number
   /** Reveal position the element reaches with this chunk. */
   target: number
+  /** The run in flight, or 0. */
+  frame: number
+  started: number
+  duration: number
 }
 
 /**
@@ -145,6 +165,19 @@ const STREAM_CSS = `
 [${STREAM_ATTRIBUTE}="roll"] {
   position: relative;
   overflow: hidden;
+}
+
+/* Appended text arrives from a horizontal edge that sits where the previous text
+   ended. Only the new characters cross it, so nothing the reader has already read
+   moves. */
+[${STREAM_ATTRIBUTE}="roll"][data-dsh-uix-appending] > * {
+  --dsh-uix-append-to: var(--dsh-uix-append-end, 100%);
+  animation: dsh-uix-append var(--dsh-uix-append-ms, 240ms) var(--dsh-uix-ease, ease) both;
+}
+
+@keyframes dsh-uix-append {
+  from { mask-image: linear-gradient(to right, #000 var(--dsh-uix-append), transparent calc(var(--dsh-uix-append) + 2ch)); }
+  to { mask-image: linear-gradient(to right, #000 var(--dsh-uix-append-to), transparent calc(var(--dsh-uix-append-to) + 2ch)); }
 }
 
 [${STREAM_ATTRIBUTE}="roll"]::after {
@@ -199,11 +232,14 @@ const STREAM_CSS = `
   }
 
   [${STREAM_ATTRIBUTE}="roll"][data-dsh-uix-rolling] > *,
-  [${STREAM_ATTRIBUTE}="roll"][data-dsh-uix-rolling]::after {
+  [${STREAM_ATTRIBUTE}="roll"][data-dsh-uix-rolling]::after,
+  [${STREAM_ATTRIBUTE}="roll"][data-dsh-uix-appending] > * {
     animation: none;
   }
 }
 `
+
+declare const performance: { now(): number }
 
 declare const window: {
   requestAnimationFrame(callback: (time: number) => void): number
@@ -244,6 +280,11 @@ interface ElementLike {
 declare const document: {
   querySelectorAll(selectors: string): { readonly length: number; [index: number]: ElementLike | undefined }
   createElement(tag: 'style'): { textContent: string; remove(): void }
+  createRange(): {
+    selectNodeContents(node: unknown): void
+    setEnd(node: unknown, offset: number): void
+    getBoundingClientRect(): { width: number }
+  }
   readonly head: { appendChild(node: unknown): unknown }
   readonly body: unknown
   readonly documentElement: { readonly style: { setProperty(name: string, value: string): void; removeProperty(name: string): string } }
@@ -270,6 +311,7 @@ export function createStreamMotion(): {
   let ease = ''
   let rollMs = ROLL_BASE_MS
   let enterMs = ENTER_BASE_MS
+  let appendMs = APPEND_BASE_MS
 
   /** Whether the current policy asks for no motion at all. */
   function still(): boolean {
@@ -327,48 +369,89 @@ export function createStreamMotion(): {
   }
 
   /**
-   * The reveal transition for one catch-up distance. Short distance, gentle
-   * duration; long distance, faster — which is the flow smoothing: the reader
-   * never waits for a long tail, and a slow model never looks rushed.
+   * Reveal duration for one backlog. See {@link REVEAL_CURVE}: the exponent makes
+   * the speed rise with the backlog, so a burst catches up instead of falling
+   * further behind.
    * @param gap - pixels the reveal is behind.
-   * @param scale - the configured duration multiplier.
    * @returns the duration in milliseconds.
    */
   function revealDuration(gap: number): number {
     const active = settings as MotionSettings
-    const raw = gap / REVEAL_PX_PER_MS * active.durationScale
-    const bounded = Math.min(MAX_REVEAL_MS, Math.max(MIN_REVEAL_MS, raw))
+    const shaped = REVEAL_CURVE * Math.pow(Math.max(1, gap), REVEAL_EXPONENT)
+    const bounded = Math.min(REVEAL_MAX_MS, Math.max(REVEAL_MIN_MS, shaped)) * active.durationScale
     return active.quantize ? quantizeMs(bounded) : bounded
   }
 
   /**
    * Advance one element's reveal to cover what just arrived.
+   *
+   * The run is retargeted from wherever the boundary currently is, rather than
+   * restarted from the last target: a chunk usually arrives while the previous one
+   * is still being revealed, and restarting would snap the boundary forward and
+   * make the reveal lurch.
+   *
    * @param element - the element being revealed.
    * @param state - its reveal state.
    */
   function advance(element: ElementLike, state: Reveal): void {
-    if (settings === undefined) return
+    const active = settings
+    if (active === undefined) return
     const computed = window.getComputedStyle(element)
     const lineHeight = Number.parseFloat(computed.lineHeight)
-    const height = Number.isFinite(lineHeight) && lineHeight > 0 ? lineHeight : 22
+    const height = Number.isFinite(lineHeight) && lineHeight > 0 ? lineHeight : 24
     element.style.setProperty('--dsh-uix-tilt', tiltFor(element, height))
     state.target = terminal(element, height)
-    const gap = state.target - state.shown
+    const gap = state.target - state.current
     if (gap < MIN_REVEAL_PX) {
       element.style.setProperty('--dsh-uix-reveal', `${state.target}px`)
-      state.shown = state.target
+      state.current = state.target
       return
     }
-    // The duration differs per chunk, so it cannot live in the sheet: a transition
-    // declared there would apply the same duration to every arrival.
-    element.style.transition = `--dsh-uix-reveal ${revealDuration(gap)}ms ${ease}`
-    element.style.setProperty('--dsh-uix-reveal', `${state.target}px`)
-    state.shown = state.target
+    state.from = state.current
+    state.started = performance.now()
+    state.duration = revealDuration(gap)
+    if (state.frame !== 0) return
+    const mode = active.mode
+    const step = (now: number): void => {
+      const live = reveals.get(element)
+      if (live === undefined || live !== state) return
+      const progress = Math.min(1, (now - state.started) / Math.max(1, state.duration))
+      const eased = easeCurve(effectCurvePoints(mode), progress)
+      state.current = state.from + (state.target - state.from) * eased
+      element.style.setProperty('--dsh-uix-reveal', `${state.current}px`)
+      if (progress >= 1) {
+        state.frame = 0
+        state.current = state.target
+        element.style.setProperty('--dsh-uix-reveal', `${state.target}px`)
+        return
+      }
+      state.frame = window.requestAnimationFrame(step)
+    }
+    state.frame = window.requestAnimationFrame(step)
+  }
+
+  /**
+   * The rendered width of an element's text.
+   *
+   * A Range measures what the browser actually laid out, so the append boundary
+   * lands on a real glyph edge without splitting any text node. Character counting
+   * was tried instead and abandoned: the DOM interleaves whitespace nodes with the
+   * text, so an offset in the normalized string does not address the node the
+   * caller means.
+   *
+   * @param element - the label.
+   * @returns the width in pixels, or 0 when it cannot be measured.
+   */
+  function textWidth(element: ElementLike): number {
+    const range = document.createRange()
+    range.selectNodeContents(element as unknown as Node)
+    return range.getBoundingClientRect().width
   }
 
   /**
    * Roll a live label: the line it showed before this update leaves upward while
-   * the new one arrives from below.
+   * the new one arrives from below. Used when the text was replaced rather than
+   * extended, so there is no prefix worth preserving.
    * @param element - the label.
    * @param previous - the text it showed before this update.
    */
@@ -389,6 +472,40 @@ export function createStreamMotion(): {
   }
 
   /**
+   * Reveal only the text appended since the previous update.
+   *
+   * The work-step labels grow by appending — "A", then "A, B", then "A, B, C" — so
+   * sliding the whole line out and back in re-animates text the reader has already
+   * read. Instead a horizontal mask edge sits where the old text ended and sweeps
+   * right, so only the new characters arrive, one after another.
+   *
+   * A replacement rather than an append has nothing to preserve, and keeps the
+   * vertical roll.
+   *
+   * @param element - the label.
+   * @param previous - the text it showed before this update, whitespace-normalized.
+   * @param previousWidth - rendered width of that text, in pixels.
+   */
+  function append(element: ElementLike, previous: string, previousWidth: number): void {
+    const now = (element.textContent ?? '').replace(/\s+/g, ' ').trim()
+    element.setAttribute(LAST_ATTRIBUTE, now)
+    if (previous === '' || !now.startsWith(previous) || previousWidth <= 0) {
+      roll(element, previous)
+      return
+    }
+    const full = textWidth(element)
+    // Remember this width so the next append starts from the right edge.
+    element.setAttribute(WIDTH_ATTRIBUTE, String(full))
+    if (full <= previousWidth + 1) return
+    element.style.setProperty('--dsh-uix-append', `${previousWidth}px`)
+    element.style.setProperty('--dsh-uix-append-end', `${full}px`)
+    element.removeAttribute('data-dsh-uix-appending')
+    void element.scrollHeight
+    element.setAttribute('data-dsh-uix-appending', '')
+    window.setTimeout(() => { element.removeAttribute('data-dsh-uix-appending') }, appendMs)
+  }
+
+  /**
    * Drop every mark this layer put on one element and hand it back untouched.
    *
    * The reveal is first moved past the content, which is the position at which the
@@ -404,6 +521,7 @@ export function createStreamMotion(): {
     reveals.delete(element)
     element.removeAttribute(STREAM_ATTRIBUTE)
     element.removeAttribute(LAST_ATTRIBUTE)
+    element.removeAttribute(WIDTH_ATTRIBUTE)
     element.removeAttribute('data-dsh-uix-prev')
     element.removeAttribute('data-dsh-uix-rolling')
     const clear = (): void => {
@@ -416,7 +534,7 @@ export function createStreamMotion(): {
       return
     }
     element.style.setProperty('--dsh-uix-reveal', `${state.target + element.scrollHeight}px`)
-    window.setTimeout(clear, MAX_REVEAL_MS)
+    window.setTimeout(clear, REVEAL_MAX_MS)
   }
 
   /** Re-measure every live element that still exists. */
@@ -483,12 +601,13 @@ export function createStreamMotion(): {
           // A label starts by showing what it currently says; only the next change
           // has a previous line to roll out.
           element.setAttribute(LAST_ATTRIBUTE, (element.textContent ?? '').replace(/\s+/g, ' ').trim())
+          element.setAttribute(WIDTH_ATTRIBUTE, String(textWidth(element)))
         } else {
           // A body first seen mid-stream already shows what arrived before this
           // layer started watching; revealing that from zero would blank a message
           // the reader is looking at.
           const height = element.scrollHeight
-          reveals.set(element, { shown: height, target: height })
+          reveals.set(element, { current: height, from: height, target: height, frame: 0, started: 0, duration: 0 })
         }
         element.setAttribute(STREAM_ATTRIBUTE, mode)
       }
@@ -496,8 +615,10 @@ export function createStreamMotion(): {
       const text = (element.textContent ?? '').replace(/\s+/g, ' ').trim()
       const previous = element.getAttribute(LAST_ATTRIBUTE) ?? ''
       if (previous !== text) {
-        roll(element, previous)
-        element.setAttribute(LAST_ATTRIBUTE, text)
+        // The width recorded after the last update is the edge the new text starts
+        // at; measuring the old text now is impossible, it is already replaced.
+        const previousWidth = Number.parseFloat(element.getAttribute(WIDTH_ATTRIBUTE) ?? '0')
+        append(element, previous, Number.isFinite(previousWidth) ? previousWidth : 0)
       }
     }
     unveil()
@@ -583,6 +704,7 @@ export function createStreamMotion(): {
     document.documentElement.style.removeProperty('--dsh-uix-ease')
     document.documentElement.style.removeProperty('--dsh-uix-roll')
     document.documentElement.style.removeProperty('--dsh-uix-enter')
+    document.documentElement.style.removeProperty('--dsh-uix-append-ms')
     const entering = document.querySelectorAll(`[${ENTER_ATTRIBUTE}]`)
     for (let index = 0; index < entering.length; index += 1) {
       entering[index]?.removeAttribute(ENTER_ATTRIBUTE)
@@ -612,6 +734,9 @@ export function createStreamMotion(): {
       const scaledEnter = ENTER_BASE_MS * next.durationScale
       enterMs = next.quantize ? quantizeMs(scaledEnter) : scaledEnter
       document.documentElement.style.setProperty('--dsh-uix-enter', `${enterMs}ms`)
+      const scaledAppend = APPEND_BASE_MS * next.durationScale
+      appendMs = next.quantize ? quantizeMs(scaledAppend) : scaledAppend
+      document.documentElement.style.setProperty('--dsh-uix-append-ms', `${appendMs}ms`)
       install()
     },
     restore: uninstall,
