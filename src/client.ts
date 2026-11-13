@@ -17,6 +17,7 @@ import {
   type SetPathsArgs, type SetPathsResult, type ThemeTokenModes,
 } from './shared.ts'
 import { createMotion } from './motion.ts'
+import { createScrollMotion } from './scroll.ts'
 import { ROW_CSS } from './styles.ts'
 
 /** Minimal React face the bundle uses (the real React arrives from the loader). */
@@ -236,6 +237,8 @@ const DICTS: Record<string, Record<string, string>> = {
     'motion.spatial-split-hint': '位移曲线带过冲（快位移约 9%，默认位移约 1.4%），效果曲线没有。关闭后全部使用效果曲线。',
     'motion.quantize': '时长对齐到 Material 档位',
     'motion.quantize-hint': '把改写后的时长吸附到 50/100/150/200/250/300/350/400/450/500/550/600/700/800/900/1000ms。',
+    'motion.scroll': '滚动使用同一曲线',
+    'motion.scroll-hint': '接管脚本调用的平滑滚动（聊天跟随、轨迹定位、卡片居中），改用本页曲线。读者一旦滚轮、触摸或按键，脚本滚动立即停止并交还原生控制。',
     'motion.reduced': '始终减弱动效',
     'motion.reduced-hint': '开启后忽略系统的「减弱动态效果」偏好，一律把时长压到 1ms。关闭时跟随系统。',
     'motion.system-reduced': '系统已请求减弱动效，本页动画正在被压制。',
@@ -266,6 +269,8 @@ const DICTS: Record<string, Record<string, string>> = {
     'motion.spatial-split-hint': 'The spatial curves overshoot (about 9% for the fast one, 1.4% for the default); the effects curve does not. Turning this off uses the effects curve everywhere.',
     'motion.quantize': 'Snap durations to the Material ladder',
     'motion.quantize-hint': 'Pull rewritten durations onto 50/100/150/200/250/300/350/400/450/500/550/600/700/800/900/1000 ms.',
+    'motion.scroll': 'Scroll on the same curve',
+    'motion.scroll-hint': 'Take over scripted smooth scrolling — chat follow, trajectory locate, card centring — and drive it on this page\'s curve. Any wheel, touch, or scroll key stops the scripted motion at once and hands control back to the browser.',
     'motion.reduced': 'Always reduce motion',
     'motion.reduced-hint': 'Ignore the system reduce-motion preference and force every duration to 1 ms. Off follows the system.',
     'motion.system-reduced': 'The system asked for reduced motion; this page is being held still.',
@@ -334,6 +339,8 @@ function registerClient(): void {
         const listeners = new Set<() => void>()
         /** The CSSOM rewriter; it owns every page-level motion change. */
         const motion = createMotion()
+        /** The scripted-scroll layer; it replaces the UA's smooth scrolling. */
+        const scrolling = createScrollMotion()
         /**
          * Replace the rendered state and notify every mounted row.
          * @param patch - fields to change.
@@ -368,6 +375,7 @@ function registerClient(): void {
         const applyMotion = (next: MotionSettings): void => {
           if (disposed) return
           motion.apply(next)
+          scrolling.apply(next)
         }
 
         /**
@@ -383,6 +391,7 @@ function registerClient(): void {
           || left.spatialSplit !== right.spatialSplit
           || left.quantize !== right.quantize
           || left.reduced !== right.reduced
+          || left.scroll !== right.scroll
 
         /** Drop the palette override layer, if one is mounted. */
         const clearOverride = (): void => {
@@ -923,6 +932,9 @@ function registerClient(): void {
               checkbox(current.quantize,
                 next => { void saveMotion({ quantize: next }) },
                 tr('motion.quantize'), tr('motion.quantize-hint'), locked),
+              checkbox(current.scroll,
+                next => { void saveMotion({ scroll: next }) },
+                tr('motion.scroll'), tr('motion.scroll-hint'), locked),
               checkbox(current.reduced === 'always',
                 next => { void saveMotion({ reduced: next ? 'always' : 'system' }) },
                 tr('motion.reduced'), tr('motion.reduced-hint'), locked),
@@ -975,9 +987,10 @@ function registerClient(): void {
           return () => {
             disposed = true
             teardown()
-            // The motion layer owns page-wide declaration rewrites, so it is
-            // torn down on unmount even though the palette switch never gated it.
+            // Both layers touch the page globally, so they are torn down on
+            // unmount even though the palette switch never gated them.
             motion.restore()
+            scrolling.restore()
           }
         }, 'ui-experience: page-level layers')
         void poll()

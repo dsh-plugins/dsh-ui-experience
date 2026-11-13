@@ -59,6 +59,8 @@ export interface MotionSettings {
   /** Whether rewritten durations snap onto the Material duration ladder. */
   quantize: boolean
   reduced: MotionReduced
+  /** Whether scripted smooth scrolling is installed over the native one. */
+  scroll: boolean
 }
 
 /** A motion layer that already did nothing; the client compares against it. */
@@ -68,6 +70,7 @@ export const MOTION_OFF: MotionSettings = {
   spatialSplit: true,
   quantize: false,
   reduced: 'system',
+  scroll: true,
 }
 
 /** Arguments of the poll endpoint: the caller's last seen palette version. */
@@ -134,6 +137,7 @@ export interface SetMotionArgs {
   spatialSplit?: boolean
   quantize?: boolean
   reduced?: MotionReduced
+  scroll?: boolean
 }
 
 /** Result of the setMotion endpoint: the settings now in effect. */

@@ -92,6 +92,7 @@ export const Config = z.object({
   motionSpatialSplit: z.boolean().default(true).volatile(),
   motionQuantize: z.boolean().default(false).volatile(),
   motionReduced: z.string().pattern(MOTION_REDUCED).default('system').volatile(),
+  motionScroll: z.boolean().default(true).volatile(),
 })
 
 /** Resolved configuration: each field is a live getter. */
@@ -105,6 +106,7 @@ type Config = {
   motionSpatialSplit: VolatileValue<boolean>
   motionQuantize: VolatileValue<boolean>
   motionReduced: VolatileValue<string>
+  motionScroll: VolatileValue<boolean>
 }
 
 /** Material You color roles the mapping consumes. */
@@ -442,6 +444,7 @@ function effectiveMotion(config: Config): MotionSettings {
     spatialSplit: config.motionSpatialSplit.get(),
     quantize: config.motionQuantize.get(),
     reduced: config.motionReduced.get() as MotionReduced,
+    scroll: config.motionScroll.get(),
   }
 }
 
@@ -809,8 +812,9 @@ class UiExperienceService extends TypertRemoteService {
     const scale = args?.durationScale
     const spatialSplit = args?.spatialSplit
     const quantize = args?.quantize
+    const scroll = args?.scroll
     if (mode === undefined && reduced === undefined && scale === undefined
-      && spatialSplit === undefined && quantize === undefined) {
+      && spatialSplit === undefined && quantize === undefined && scroll === undefined) {
       throw new Error('ui-experience: setMotion requires at least one field')
     }
     if (mode !== undefined && !MOTION_MODE.test(mode)) {
@@ -830,6 +834,9 @@ class UiExperienceService extends TypertRemoteService {
     if (quantize !== undefined && typeof quantize !== 'boolean') {
       throw new Error(`ui-experience: quantize must be a boolean, got ${typeof quantize}`)
     }
+    if (scroll !== undefined && typeof scroll !== 'boolean') {
+      throw new Error(`ui-experience: scroll must be a boolean, got ${typeof scroll}`)
+    }
     await this.persist(current => ({
       ...current,
       ...(mode === undefined ? {} : { motion: mode }),
@@ -837,11 +844,12 @@ class UiExperienceService extends TypertRemoteService {
       ...(scale === undefined ? {} : { motionDurationScale: scale }),
       ...(spatialSplit === undefined ? {} : { motionSpatialSplit: spatialSplit }),
       ...(quantize === undefined ? {} : { motionQuantize: quantize }),
+      ...(scroll === undefined ? {} : { motionScroll: scroll }),
     }))
     const applied = effectiveMotion(this.config)
     logLine(`setMotion: mode=${applied.mode} durationScale=${String(applied.durationScale)}`
       + ` spatialSplit=${String(applied.spatialSplit)} quantize=${String(applied.quantize)}`
-      + ` reduced=${applied.reduced}`)
+      + ` reduced=${applied.reduced} scroll=${String(applied.scroll)}`)
     return applied
   }
 

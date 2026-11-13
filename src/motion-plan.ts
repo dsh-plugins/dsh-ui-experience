@@ -11,6 +11,9 @@ import type { MotionMode } from './shared.ts'
 /** Whether an animated property reads as the element moving through space. */
 export type MotionDomain = 'spatial' | 'effects'
 
+/** The four control ordinates of a cubic Bézier easing, as CSS writes them. */
+export type CurvePoints = readonly [number, number, number, number]
+
 /**
  * Properties whose interpolation reads as physical movement. Anything absent
  * from this set is treated as an effect (colour, opacity, shadow, filter),
@@ -46,11 +49,53 @@ const SPATIAL_PROPERTIES = new Set([
  * `standard`; taking the decelerate half by name keeps the movement side of the
  * split distinct without inventing a curve Material does not publish.
  */
-const CURVE_M3_SPATIAL = 'cubic-bezier(0.05, 0.7, 0.1, 1)'
-const CURVE_M3_EFFECTS = 'cubic-bezier(0.2, 0, 0, 1)'
-const CURVE_M3E_SPATIAL_FAST = 'cubic-bezier(0.42, 1.67, 0.21, 0.9)'
-const CURVE_M3E_SPATIAL = 'cubic-bezier(0.38, 1.21, 0.22, 1)'
-const CURVE_M3E_EFFECTS = 'cubic-bezier(0.34, 0.8, 0.34, 1)'
+const POINTS_M3_SPATIAL: CurvePoints = [0.05, 0.7, 0.1, 1]
+const POINTS_M3_EFFECTS: CurvePoints = [0.2, 0, 0, 1]
+const POINTS_M3E_SPATIAL_FAST: CurvePoints = [0.42, 1.67, 0.21, 0.9]
+const POINTS_M3E_SPATIAL: CurvePoints = [0.38, 1.21, 0.22, 1]
+const POINTS_M3E_EFFECTS: CurvePoints = [0.34, 0.8, 0.34, 1]
+
+const CURVE_M3_SPATIAL = `cubic-bezier(${POINTS_M3_SPATIAL.join(', ')})`
+const CURVE_M3_EFFECTS = `cubic-bezier(${POINTS_M3_EFFECTS.join(', ')})`
+const CURVE_M3E_SPATIAL_FAST = `cubic-bezier(${POINTS_M3E_SPATIAL_FAST.join(', ')})`
+const CURVE_M3E_SPATIAL = `cubic-bezier(${POINTS_M3E_SPATIAL.join(', ')})`
+const CURVE_M3E_EFFECTS = `cubic-bezier(${POINTS_M3E_EFFECTS.join(', ')})`
+
+/**
+ * The control points of one curve family's effect curve, for callers that
+ * evaluate the curve themselves instead of handing it to CSS.
+ * @param mode - the active family.
+ * @returns the four cubic Bézier control ordinates.
+ */
+export function effectCurvePoints(mode: MotionMode): CurvePoints {
+  return mode === 'm3' ? POINTS_M3_EFFECTS : POINTS_M3E_EFFECTS
+}
+
+/**
+ * Evaluate a cubic Bézier easing at one x, the way CSS does: solve the curve's
+ * x for t, then read y at that t.
+ * @param points - the four control ordinates.
+ * @param x - progress along the x axis, 0 to 1.
+ * @returns progress along the y axis.
+ */
+export function easeCurve(points: CurvePoints, x: number): number {
+  const [x1, y1, x2, y2] = points
+  const clamped = Math.min(1, Math.max(0, x))
+  // Bisect for t; the curve is monotonic in x for every point set this file uses.
+  let low = 0
+  let high = 1
+  let t = clamped
+  for (let step = 0; step < 24; step += 1) {
+    const inverse = 1 - t
+    const value = 3 * inverse * inverse * t * x1 + 3 * inverse * t * t * x2 + t * t * t
+    if (Math.abs(value - clamped) < 1e-5) break
+    if (value < clamped) low = t
+    else high = t
+    t = (low + high) / 2
+  }
+  const inverse = 1 - t
+  return 3 * inverse * inverse * t * y1 + 3 * inverse * t * t * y2 + t * t * t
+}
 
 /**
  * Durations at or below this threshold take the fast spatial curve. The
