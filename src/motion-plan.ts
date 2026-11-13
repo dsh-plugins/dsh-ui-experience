@@ -35,13 +35,13 @@ const SPATIAL_PROPERTIES = new Set([
 ])
 
 /**
- * Material 3 Expressive spatial curves, written the way this layer emits them.
- * Values are the four control-point ordinates of the cubic Bézier; the two
- * spatial entries carry a deliberate overshoot (peak 1.092 and 1.014), which is
- * the whole point of the expressive family and the reason they must never be
- * applied to a colour.
+ * The curves this layer writes, as cubic Bézier control points. Material 3 and
+ * Material 3 Expressive each split movement from effect: movement may decelerate
+ * hard or overshoot, while colours and opacity must not overshoot at all, because
+ * an interpolated colour that passes 1.09 of its target flashes through values
+ * the palette never contained.
  */
-const CURVE_M3_SPATIAL = 'cubic-bezier(0.2, 0, 0, 1)'
+const CURVE_M3_SPATIAL = 'cubic-bezier(0.05, 0.7, 0.1, 1)'
 const CURVE_M3_EFFECTS = 'cubic-bezier(0.2, 0, 0, 1)'
 const CURVE_M3E_SPATIAL_FAST = 'cubic-bezier(0.42, 1.67, 0.21, 0.9)'
 const CURVE_M3E_SPATIAL = 'cubic-bezier(0.38, 1.21, 0.22, 1)'
@@ -201,10 +201,12 @@ export function classifyAll(properties: Iterable<string>): MotionDomain {
 export function curveFor(
   mode: MotionMode, domain: MotionDomain, spatialSplit: boolean, originalMs: number | undefined,
 ): string {
+  // Material 3's emphasized family is a five-point Bézier with no cubic-bezier()
+  // form, but its two halves each are: the decelerate half is what a movement
+  // into place wants, and the standard curve serves everything that is not
+  // movement. Turning the split off falls through to the effects curve.
   if (mode === 'm3') {
-    // Material 3's standard and emphasized families both reduce to this single
-    // cubic in CSS; the five-point emphasized curve has no cubic-bezier form.
-    return domain === 'spatial' ? CURVE_M3_SPATIAL : CURVE_M3_EFFECTS
+    return spatialSplit && domain === 'spatial' ? CURVE_M3_SPATIAL : CURVE_M3_EFFECTS
   }
   if (mode === 'm3e' && spatialSplit && domain === 'spatial') {
     return originalMs !== undefined && originalMs <= FAST_SPATIAL_MAX_MS
