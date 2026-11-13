@@ -8,13 +8,13 @@ importers:
 
   .:
     dependencies:
+      '@deepseek-ai/dsh-typert-protocol':
+        specifier: ^0.2.2-rc.2
+        version: 0.2.2-rc.2(@deepseek-ai/cordis@4.1.0)
       '@deepseek-ai/schemastery':
         specifier: ^3.19.0
         version: 3.19.0
     devDependencies:
-      '@deepseek-ai/dsh-typert-protocol':
-        specifier: 0.2.2-rc.2
-        version: 0.2.2-rc.2(@deepseek-ai/cordis@4.1.0)
       '@types/node':
         specifier: ^26.6.6
         version: 26.6.6

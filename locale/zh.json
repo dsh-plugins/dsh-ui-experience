@@ -1,7 +1,6 @@
 {
   "meta": {
     "title": "界面体验",
-    "description": "界面体验增强：读取系统 matugen 生成的 Material You 配色并应用为界面主题。在「设置 → 通用设置」的外观行点击 Matugen 即可切换；配色文件更新后界面自动跟随。",
-    "detail": "docs/DETAIL.md"
+    "description": "让 DSH 界面跟随系统 matugen 生成的 Material You 配色：在「设置 → 通用设置 → Matugen 配色跟随」开启后，界面配色作为叠加层套在当前主题上，并随配色文件重新生成自动更新。可在同一行展开「配色文件路径」，改写 matugen 颜色文件或 DSH 令牌文件的路径（默认 ~/.local/state/quickshell/user/generated/ 下，令牌文件优先）。配色只在本地读取，不上传。关闭开关后回到原生配色。另统一界面边框宽度（配置项 borderWidth，默认 0.5px）。该覆盖仅在开关开启时生效，且会同时压窄正文引用块等装饰性边框。"
   }
 }

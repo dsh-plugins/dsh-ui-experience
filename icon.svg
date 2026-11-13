@@ -1,4 +1,4 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+<svg xmlns="http://www.w3.org/2000/svg" width="36" height="36" viewBox="0 0 36 36">
   <defs>
     <linearGradient id="dsh-uix-icon-ring" x1="0" y1="0" x2="1" y2="1">
       <stop offset="0" stop-color="#f6bc70"/>
@@ -6,7 +6,7 @@
       <stop offset="1" stop-color="#bacd9f"/>
     </linearGradient>
   </defs>
-  <circle cx="32" cy="32" r="26" fill="none" stroke="url(#dsh-uix-icon-ring)" stroke-width="6"/>
-  <circle cx="32" cy="32" r="12" fill="#251e17"/>
-  <circle cx="32" cy="32" r="5" fill="#f6bc70"/>
+  <circle cx="18" cy="18" r="13.2" fill="none" stroke="url(#dsh-uix-icon-ring)" stroke-width="3.2"/>
+  <circle cx="18" cy="18" r="6.1" fill="#251e17"/>
+  <circle cx="18" cy="18" r="2.55" fill="#f6bc70"/>
 </svg>

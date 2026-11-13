@@ -1,12 +1,25 @@
 /**
  * Shared protocol between the host and client halves of the UI experience
- * bundle: the Remote service namespace and the poll payload shapes. Both
- * halves import this file; the client build must keep it free of Node and
- * DSH package imports.
+ * bundle: the Remote service namespace, the configuration defaults, and the
+ * poll payload shapes. Both halves import this file; the client build must
+ * keep it free of Node and DSH package imports.
  */
 
 /** Cordis service key and wire namespace of the host-side Remote service. */
 export const REMOTE_SERVICE = 'uiExperience'
+
+/**
+ * Attribute the host's boot script sets on `<html>` while the palette is
+ * active, and the client drops when the user turns the switch off. The boot
+ * CSS is scoped by it, so removing it restores the built-in boot paint.
+ */
+export const BOOT_ATTRIBUTE = 'data-dsh-uix-matugen'
+
+/** Default matugen colors file, written by the user's quickshell setup. */
+export const DEFAULT_COLORS_PATH = '~/.local/state/quickshell/user/generated/colors.json'
+
+/** Default pre-mapped DSH token file; wins over the colors file when it exists. */
+export const DEFAULT_TOKENS_PATH = '~/.local/state/quickshell/user/generated/dsh-tokens.json'
 
 /** DSW token overrides for one palette mode. */
 export type ThemeTokenTable = Record<string, string>
@@ -17,21 +30,40 @@ export interface ThemeTokenModes {
   dark: ThemeTokenTable
 }
 
+/** The palette paths in effect, exactly as configured (before `~` expansion). */
+export interface PalettePaths {
+  colors: string
+  tokens: string
+}
+
 /** Arguments of the poll endpoint: the caller's last seen palette version. */
 export interface PollArgs {
-  known?: number
+  known?: string
 }
 
 /**
- * Result of the poll endpoint. `borderWidth` rides every changed payload and
- * every steady-state payload, so a config-only border edit reaches the client
- * without waiting for a matugen regeneration.
+ * Result of the poll endpoint. `active`, `borderWidth`, and `paths` ride every
+ * response, so a configuration-only edit reaches the client without waiting
+ * for a matugen regeneration.
  */
 export type PollResult =
-  | { changed: true; version: number; tokens: ThemeTokenModes; active: boolean; borderWidth: string }
-  | { changed: false; active: boolean; borderWidth: string }
-  | { missing: true; active: boolean }
-  | { error: string; active: boolean }
+  | {
+    status: 'ok'
+    changed: boolean
+    version: string
+    tokens?: ThemeTokenModes
+    source: string
+    active: boolean
+    borderWidth: string
+    paths: PalettePaths
+  }
+  | {
+    status: 'missing' | 'error'
+    message: string
+    active: boolean
+    borderWidth: string
+    paths: PalettePaths
+  }
 
 /** Arguments of the setActive endpoint. */
 export interface SetActiveArgs {
@@ -41,4 +73,15 @@ export interface SetActiveArgs {
 /** Result of the setActive endpoint. */
 export interface SetActiveResult {
   active: boolean
+}
+
+/** Arguments of the setPaths endpoint; an omitted field keeps its value. */
+export interface SetPathsArgs {
+  colorsPath?: string
+  tokensPath?: string
+}
+
+/** Result of the setPaths endpoint: the paths now in effect. */
+export interface SetPathsResult {
+  paths: PalettePaths
 }

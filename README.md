@@ -1,16 +1,122 @@
 # dsh-ui-experience
 
-DeepSeek Harness 界面体验增强插件：读取系统 matugen 生成的 Material You 配色，叠加在当前主题上，并统一界面边框宽度。
+DeepSeek Harness 界面体验插件（`@dsh-plugin/dsh-ui-experience`，仓库：<https://github.com/dsh-plugins/dsh-ui-experience>）：读取系统 matugen 生成的 Material You 配色，作为叠加层套在 DSH 当前主题上，并统一界面边框宽度。
 
 ## 功能
 
-- 「设置 → 通用设置」新增 **Matugen 配色跟随** 开关，开启后界面配色跟随 matugen 输出（换壁纸等触发的重新生成会在数秒内自动生效）；开关状态持久化，重启应用后自动恢复。
-- 原生「外观」行的浅色 / 深色 / 跟随系统不受影响，配色作为叠加层工作。
-- 边框宽度可通过插件配置 `borderWidth` 调整（默认 `0.5px`）。
+- 「设置 → 通用设置」新增一行 **Matugen 配色跟随**，由开关控制启用 / 停用。开启后界面立即叠加 matugen 当前输出的配色；matugen 重新生成颜色（例如更换壁纸）后数秒内自动跟随，无需刷新页面。
+- 配色是叠加层，不改写原生「浅色 / 深色 / 跟随系统」偏好；开关关闭后回到原生配色。
+- 同一行可展开 **配色文件路径**，分别编辑 matugen 颜色文件与 DSH 令牌文件的路径，两者都会持久化；开关状态与路径均保存在 profile 配置里，重启应用后自动恢复。
+- 统一界面边框宽度：插件配置 `borderWidth`（默认 `0.5px`），仅在「Matugen 配色跟随」开启时生效。
+- 配色文件只在本地读取，不上传。
 
-## 使用前提
+## 使用
 
-- matugen 输出位于 `~/.local/state/quickshell/user/generated/colors.json`；也可用专用模板产出 `dsh-tokens.json`（见 [docs/DETAIL.md](docs/DETAIL.md)）。
+1. 安装并启用插件后刷新页面。
+2. 打开「设置 → 通用设置」，开启 **Matugen 配色跟随**。
+3. 界面配色随配色文件内容变化自动更新，检测周期 2 秒。
+4. 关闭开关：配色叠加层、边框覆盖与启动底色叠加同时立即撤销——注入样式以 `<html data-dsh-uix-matugen>` 为作用域，关闭时该属性被移除，规则立刻失效；注入的 `<style>` / `<script>` 元素本身保留到下次刷新。此后插件停止 2 秒轮询，改为约 30 秒一次的低频检查。
+
+## 配置路径
+
+「Matugen 配色跟随」所在行可展开 **配色文件路径**，编辑两个路径并保存：
+
+| 文件 | 默认路径 | 用途 |
+| --- | --- | --- |
+| 颜色文件 | `~/.local/state/quickshell/user/generated/colors.json` | matugen 原始输出；插件用内置映射把它转换为界面配色 |
+| 令牌文件 | `~/.local/state/quickshell/user/generated/dsh-tokens.json` | 由自定义 matugen 模板产出的、已映射好的 DSH token 表；**存在时优先**使用 |
+
+- 令牌文件优先：它存在时忽略颜色文件；删除它才回落到内置映射。
+- 路径必须是绝对路径，或以 `~/` 开头（`~` 按当前用户主目录展开）。
+- 「恢复默认」把两个路径重置为上表默认值。
+- 两个文件都不存在时插件不上色，界面保持原生配色。
+
+## 表面层级
+
+内置映射把 Material You 的六档表面按明度排成阶梯：
+
+`surface_container_lowest` → `surface_container_low` → `surface_container` → `surface_container_high` → `surface_container_highest` → `surface_bright`
+
+- 侧栏取最暗一档，主面板从第二档起算，因此侧栏比主面板更暗。
+- 菜单、卡片、输入区、代码块等其余表面按原有相对层级整体上移一档，各层之间的相对明暗顺序不变。
+- Material 相邻档的色差本身较小，输入区、卡片与主面板之间只有微弱的层次区分；需要更强的分区感时应单独调整对应 token，而不是继续依赖相邻档。
+- `overlay` 原本就位于阶梯顶端，没有更高的档位可移，因此在最亮一档上用 `color-mix(in srgb, …, white 8%)` 提亮，保持它高于其余浮层。
+- 遮罩类 token 用 `color-mix(…, transparent 50%)` 保留透明度，避免不透明的纯 `scrim` 盖住下层界面。
+
+## 颜色来源与优先级
+
+1. 令牌文件 `dsh-tokens.json`：`{ "light": { … }, "dark": { … } }` 两张 DSH token 表，按当前模式分别取用，浅色与深色可以使用不同配色。
+2. 颜色文件 `colors.json`：matugen 的 Material You 颜色表，由插件内置映射转换。matugen 只给出一套暗色方案，因此浅色与深色两种模式叠加的是同一张表。
+3. 两者都不存在：不叠加配色。
+
+token 名必须以 `--dsw-` 开头；未列出的 token 保持 DSH 内置值。
+
+## matugen 模板接入（可选）
+
+默认的 `colors.json` 只含一套暗色方案。若要让浅色与深色各自成表，或自行控制 DSH 全部 token 的取值，可在 `~/.config/matugen/config.toml` 增加一个模板：
+
+```toml
+[templates.dsh]
+input_path = '~/.config/matugen/templates/dsh-tokens.json'
+output_path = '~/.local/state/quickshell/user/generated/dsh-tokens.json'
+```
+
+模板文件写成一个合法 JSON 对象，`light` 与 `dark` 各一张表；matugen 把 `{{colors.<角色>.<light|dark>.hex}}` 替换为对应方案的颜色值：
+
+```json
+{
+  "light": {
+    "--dsw-alias-bg-base": "{{colors.surface.light.hex}}",
+    "--dsw-alias-bg-layer-1": "{{colors.surface_container_low.light.hex}}",
+    "--dsw-alias-bg-layer-2": "{{colors.surface_container.light.hex}}",
+    "--dsw-alias-bg-layer-3": "{{colors.surface_container_high.light.hex}}",
+    "--dsw-alias-bg-layer-4": "{{colors.surface_container_highest.light.hex}}",
+    "--dsw-alias-bg-overlay": "color-mix(in srgb, {{colors.surface_bright.light.hex}}, white 8%)",
+    "--dsw-alias-bg-mask-1": "color-mix(in srgb, {{colors.scrim.light.hex}}, transparent 50%)",
+    "--dsw-alias-border-l1": "{{colors.outline_variant.light.hex}}",
+    "--dsw-alias-border-l2": "{{colors.outline.light.hex}}",
+    "--dsw-alias-brand-primary": "{{colors.primary.light.hex}}",
+    "--dsw-alias-label-primary": "{{colors.on_surface.light.hex}}",
+    "--dsw-alias-label-secondary": "{{colors.on_surface_variant.light.hex}}",
+    "--dsw-alias-state-error-primary": "{{colors.error.light.hex}}",
+    "--dsw-alias-state-success-primary": "{{colors.tertiary.light.hex}}",
+    "--dsw-alias-state-warn-primary": "{{colors.secondary.light.hex}}",
+    "--dsw-specific-sidebar-fill": "{{colors.surface_container_lowest.light.hex}}"
+  },
+  "dark": {
+    "--dsw-alias-bg-base": "{{colors.surface.dark.hex}}",
+    "--dsw-alias-bg-layer-1": "{{colors.surface_container_low.dark.hex}}",
+    "--dsw-alias-bg-layer-2": "{{colors.surface_container.dark.hex}}",
+    "--dsw-alias-bg-layer-3": "{{colors.surface_container_high.dark.hex}}",
+    "--dsw-alias-bg-layer-4": "{{colors.surface_container_highest.dark.hex}}",
+    "--dsw-alias-bg-overlay": "color-mix(in srgb, {{colors.surface_bright.dark.hex}}, white 8%)",
+    "--dsw-alias-bg-mask-1": "color-mix(in srgb, {{colors.scrim.dark.hex}}, transparent 50%)",
+    "--dsw-alias-border-l1": "{{colors.outline_variant.dark.hex}}",
+    "--dsw-alias-border-l2": "{{colors.outline.dark.hex}}",
+    "--dsw-alias-brand-primary": "{{colors.primary.dark.hex}}",
+    "--dsw-alias-label-primary": "{{colors.on_surface.dark.hex}}",
+    "--dsw-alias-label-secondary": "{{colors.on_surface_variant.dark.hex}}",
+    "--dsw-alias-state-error-primary": "{{colors.error.dark.hex}}",
+    "--dsw-alias-state-success-primary": "{{colors.tertiary.dark.hex}}",
+    "--dsw-alias-state-warn-primary": "{{colors.secondary.dark.hex}}",
+    "--dsw-specific-sidebar-fill": "{{colors.surface_container_lowest.dark.hex}}"
+  }
+}
+```
+
+token 的值按原样写入 CSS 变量，因此 `color-mix(...)` 这类表达式可以直接写在模板里。改完模板后重新运行 matugen，插件在下一个轮询周期读到文件变化后生效。
+
+## 边框宽度
+
+- 插件配置 `borderWidth` 默认为 `0.5px`，只在「Matugen 配色跟随」开启时生效；关闭开关后边框立即恢复原生宽度。
+- 实现方式是全局覆盖所有元素的边框宽度，因此会同时压窄正文引用块等刻意加粗的装饰性边框。
+- 给元素加 `data-dsh-uix-keep-border` 属性可让该元素不被覆盖。
+
+## 限制
+
+- 走 `colors.json` 路径时 matugen 只提供一套暗色方案，浅色与深色模式叠加同一张配色表，界面的明暗切换只影响未被覆盖的元素；需要两套配色时改用 `dsh-tokens.json`。
+- 配色检测周期为 2 秒，文件变化最多延迟约 2 秒生效。
+- 关闭开关后启动底色叠加立即撤销（由作用域属性控制）；注入的样式与脚本元素保留到下次刷新，但不产生视觉效果。
 
 ## 开发
 
@@ -24,8 +130,6 @@ pnpm build
 
 ## 安装
 
-本机开发时作为 profile 依赖以 `link:` 方式引入（详见 [docs/DETAIL.md](docs/DETAIL.md)）。
-
 其他设备通过「插件管理器 → 添加插件 → 安装第三方插件」安装，粘贴 Git 仓库地址：
 
 ```
@@ -38,4 +142,3 @@ git+https://github.com/dsh-plugins/dsh-ui-experience.git
 - 目标设备需要能访问该仓库。
 - 构建产物 `lib/` 已入库，无需在目标设备上构建；安装后按提示重启 DSH。
 - 不要手动编辑 profile 的 `package.json`：包名以仓库 `package.json` 的 `name` 为准（`@dsh-plugin/dsh-ui-experience`），别名与仓库名不一致时需显式声明。
-

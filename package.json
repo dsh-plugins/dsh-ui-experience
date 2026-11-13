@@ -25,14 +25,14 @@
     "lib/client.js",
     "cordis.patch.yml",
     "locale/*.json",
-    "docs",
     "icon.svg"
   ],
   "scripts": {
-    "build": "node build.mjs",
+    "build": "tsc -p tsconfig.json && node build.mjs",
     "typecheck": "tsc -p tsconfig.json"
   },
   "dependencies": {
+    "@deepseek-ai/dsh-typert-protocol": "^0.2.2-rc.2",
     "@deepseek-ai/schemastery": "^3.19.0"
   },
   "dsh": {
@@ -52,7 +52,6 @@
     "dsh": ">=0.2.0-0"
   },
   "devDependencies": {
-    "@deepseek-ai/dsh-typert-protocol": "0.2.2-rc.2",
     "@types/node": "^26.6.6",
     "esbuild": "^0.28.2",
     "typescript": "^5.9.3"
