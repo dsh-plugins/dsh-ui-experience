@@ -88,14 +88,18 @@ const MIN_REVEAL_PX = 0.5
  *
  * The exponent is what makes this catch up rather than crawl: duration grows more
  * slowly than the distance, so the reveal speed — gap over duration — rises with
- * the backlog. One line takes about 140 ms and stays readable; ten lines take about
- * 350 ms and do not fall behind; a whole block landing at once is capped at 700 ms.
- * A linear duration would hold one constant speed and let a burst fall arbitrarily
- * far behind.
+ * the backlog.
+ *
+ * The floor is the visible buffer. One line takes about 250 ms, ten lines about
+ * 1 s, and a whole block landing at once is capped at 1.2 s — so a normal streaming
+ * rate keeps roughly a line or two of unread text behind the boundary, and a burst
+ * is absorbed into a longer run instead of being skipped. A shorter floor than this
+ * makes each arrival finish before the eye registers it, which reads as no animation
+ * at all.
  */
-const REVEAL_MIN_MS = 140
-const REVEAL_MAX_MS = 700
-const REVEAL_CURVE = 17.7
+const REVEAL_MIN_MS = 250
+const REVEAL_MAX_MS = 1200
+const REVEAL_CURVE = 36.8
 const REVEAL_EXPONENT = 0.62
 
 /**
@@ -312,6 +316,35 @@ export function createStreamMotion(): {
   let rollMs = ROLL_BASE_MS
   let enterMs = ENTER_BASE_MS
   let appendMs = APPEND_BASE_MS
+  /**
+   * Per-element run counter. Every start bumps it; a timer only clears the marks if
+   * it still owns the current generation. Without this, the timeout left by an
+   * earlier update fires mid-animation and strips the attributes the new one just
+   * set, which is what made an append look like a roll on alternate updates.
+   */
+  const generation = new WeakMap<ElementLike, number>()
+
+  /**
+   * Take the next generation for an element.
+   * @param element - the element about to animate.
+   * @returns its new generation.
+   */
+  function nextGeneration(element: ElementLike): number {
+    const next = (generation.get(element) ?? 0) + 1
+    generation.set(element, next)
+    return next
+  }
+
+  /**
+   * Clear one animation's marks, but only if it is still the newest.
+   * @param element - the element.
+   * @param run - the generation the clearance belongs to.
+   * @param attributes - attributes to remove.
+   */
+  function retire(element: ElementLike, run: number, attributes: readonly string[]): void {
+    if (generation.get(element) !== run) return
+    for (const attribute of attributes) element.removeAttribute(attribute)
+  }
 
   /** Whether the current policy asks for no motion at all. */
   function still(): boolean {
@@ -459,15 +492,16 @@ export function createStreamMotion(): {
     const before = previous.replace(/\s+/g, ' ').trim()
     const now = (element.textContent ?? '').replace(/\s+/g, ' ').trim()
     if (before === '' || before === now) return
+    const run = nextGeneration(element)
+    // One animation at a time: the sweep and the roll share the element, and leaving
+    // the other one's mark in place makes both play at once.
+    element.removeAttribute('data-dsh-uix-appending')
     element.setAttribute('data-dsh-uix-prev', before)
-    // Restart the animation even when it is already running: two updates inside one
-    // roll must not leave the second one unanimated.
     element.removeAttribute('data-dsh-uix-rolling')
     void element.scrollHeight
     element.setAttribute('data-dsh-uix-rolling', '')
     window.setTimeout(() => {
-      element.removeAttribute('data-dsh-uix-rolling')
-      element.removeAttribute('data-dsh-uix-prev')
+      retire(element, run, ['data-dsh-uix-rolling', 'data-dsh-uix-prev'])
     }, rollMs)
   }
 
@@ -486,23 +520,56 @@ export function createStreamMotion(): {
    * @param previous - the text it showed before this update, whitespace-normalized.
    * @param previousWidth - rendered width of that text, in pixels.
    */
-  function append(element: ElementLike, previous: string, previousWidth: number): void {
+  function append(element: ElementLike, previous: string, label: boolean): void {
     const now = (element.textContent ?? '').replace(/\s+/g, ' ').trim()
     element.setAttribute(LAST_ATTRIBUTE, now)
-    if (previous === '' || !now.startsWith(previous) || previousWidth <= 0) {
+    if (previous === '' || previous === now) return
+    const full = textWidth(element)
+    element.setAttribute(WIDTH_ATTRIBUTE, String(full))
+
+    // How much of the new text the reader has already seen. A label that grows by
+    // appending shares its whole previous text; a detail that slides its window
+    // shares only a suffix-length prefix. Measuring the shared prefix covers both,
+    // so the sweep starts at the first character that actually changed instead of
+    // replaying the line.
+    const shared = commonPrefix(previous, now)
+    const ratio = now.length === 0 ? 1 : shared / now.length
+    if (full <= 1) return
+
+    // A one-line label never rolls: the same text scrolling out and back in reads as
+    // the row sliding rather than as new text arriving, because a step label changes
+    // by growing. The multi-line reasoning summary is the opposite case — it stands
+    // for a whole paragraph, so when its line is replaced rather than extended there
+    // is no shared prefix and the vertical roll is the honest motion.
+    if (!label && ratio < 0.999) {
       roll(element, previous)
       return
     }
-    const full = textWidth(element)
-    // Remember this width so the next append starts from the right edge.
-    element.setAttribute(WIDTH_ATTRIBUTE, String(full))
-    if (full <= previousWidth + 1) return
-    element.style.setProperty('--dsh-uix-append', `${previousWidth}px`)
-    element.style.setProperty('--dsh-uix-append-end', `${full}px`)
+
+    const run = nextGeneration(element)
+    element.removeAttribute('data-dsh-uix-rolling')
+    element.removeAttribute('data-dsh-uix-prev')
+    element.style.setProperty('--dsh-uix-append', `${Math.round(full * ratio)}px`)
+    element.style.setProperty('--dsh-uix-append-end', `${Math.round(full)}px`)
     element.removeAttribute('data-dsh-uix-appending')
     void element.scrollHeight
     element.setAttribute('data-dsh-uix-appending', '')
-    window.setTimeout(() => { element.removeAttribute('data-dsh-uix-appending') }, appendMs)
+    window.setTimeout(() => {
+      retire(element, run, ['data-dsh-uix-appending'])
+    }, appendMs)
+  }
+
+  /**
+   * Length of the prefix two strings share.
+   * @param left - the older text.
+   * @param right - the newer text.
+   * @returns the shared character count.
+   */
+  function commonPrefix(left: string, right: string): number {
+    const limit = Math.min(left.length, right.length)
+    let index = 0
+    while (index < limit && left.charCodeAt(index) === right.charCodeAt(index)) index += 1
+    return index
   }
 
   /**
@@ -614,12 +681,7 @@ export function createStreamMotion(): {
       if (mode !== 'roll') continue
       const text = (element.textContent ?? '').replace(/\s+/g, ' ').trim()
       const previous = element.getAttribute(LAST_ATTRIBUTE) ?? ''
-      if (previous !== text) {
-        // The width recorded after the last update is the edge the new text starts
-        // at; measuring the old text now is impossible, it is already replaced.
-        const previousWidth = Number.parseFloat(element.getAttribute(WIDTH_ATTRIBUTE) ?? '0')
-        append(element, previous, Number.isFinite(previousWidth) ? previousWidth : 0)
-      }
+      if (previous !== text) append(element, previous, element.hasAttribute('data-shimmer'))
     }
     unveil()
     // Anything still marked but no longer live has finished.
