@@ -238,7 +238,7 @@ const DICTS: Record<string, Record<string, string>> = {
     'motion.quantize': '时长对齐到 Material 档位',
     'motion.quantize-hint': '把改写后的时长吸附到 50/100/150/200/250/300/350/400/450/500/550/600/700/800/900/1000ms。',
     'motion.scroll': '定位滚动使用同一曲线',
-    'motion.scroll-hint': '接管 scrollIntoView 的平滑定位（轨迹行聚焦、插件卡片居中），改用本页曲线。读者一旦在容器上滚轮、触摸或按滚动键，脚本滚动立即停止并交还原生控制。聊天跟随与各类 scrollTo 滚动保持原生：它们靠每次滚动只结束一次的 scrollend 判断意图，而逐帧脚本滚动会每帧结束一次。',
+    'motion.scroll-hint': '接管 scrollIntoView 的平滑定位（轨迹行聚焦、插件卡片居中、会话检查器跳转），改用本页曲线。读者一旦在容器上滚轮、触摸或按滚动键，脚本滚动立即停止并交还原生控制。默认关闭：脚本滚动会每帧产生一次 scrollend，会话检查器的定位高亮靠它判断「滚动已停」，会被提前唤醒。聊天跟随走 scrollTo，不受影响。',
     'motion.reduced': '始终减弱动效',
     'motion.reduced-hint': '开启后忽略系统的「减弱动态效果」偏好，一律把时长压到 1ms。关闭时跟随系统。',
     'motion.system-reduced': '系统已请求减弱动效，本页动画正在被压制。',
@@ -270,7 +270,7 @@ const DICTS: Record<string, Record<string, string>> = {
     'motion.quantize': 'Snap durations to the Material ladder',
     'motion.quantize-hint': 'Pull rewritten durations onto 50/100/150/200/250/300/350/400/450/500/550/600/700/800/900/1000 ms.',
     'motion.scroll': 'Locating scroll on the same curve',
-    'motion.scroll-hint': 'Take over the smooth locating jump of scrollIntoView — focus a trajectory row, centre a plugin card — and drive it on this page\'s curve. A wheel, touch, or scroll key over the container stops it at once. Chat follow and other scrollTo scrolling stay native: they read one end-of-scroll event per gesture to infer intent, and frame-by-frame scripted scrolling ends once per frame.',
+    'motion.scroll-hint': 'Take over the smooth locating jump of scrollIntoView — focus a trajectory row, centre a plugin card, jump to a session-inspector node — and drive it on this page\'s curve. A wheel, touch, or scroll key over the container stops it at once. Off by default: scripted scrolling ends once per frame, and the session inspector\'s reveal highlight reads that end-of-scroll event to decide when to place itself, so it would fire early. Chat follow goes through scrollTo and is unaffected.',
     'motion.reduced': 'Always reduce motion',
     'motion.reduced-hint': 'Ignore the system reduce-motion preference and force every duration to 1 ms. Off follows the system.',
     'motion.system-reduced': 'The system asked for reduced motion; this page is being held still.',
@@ -339,7 +339,7 @@ function registerClient(): void {
         const listeners = new Set<() => void>()
         /** The CSSOM rewriter; it owns every page-level motion change. */
         const motion = createMotion()
-        /** The scripted-scroll layer; it replaces the UA's smooth scrolling. */
+        /** The scripted-reveal layer; it replaces smooth `scrollIntoView`. */
         const scrolling = createScrollMotion()
         /**
          * Replace the rendered state and notify every mounted row.

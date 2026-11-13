@@ -59,7 +59,7 @@ export interface MotionSettings {
   /** Whether rewritten durations snap onto the Material duration ladder. */
   quantize: boolean
   reduced: MotionReduced
-  /** Whether scripted smooth scrolling is installed over the native one. */
+  /** Whether scripted smooth locating replaces the native `scrollIntoView`. */
   scroll: boolean
 }
 
@@ -70,7 +70,7 @@ export const MOTION_OFF: MotionSettings = {
   spatialSplit: true,
   quantize: false,
   reduced: 'system',
-  scroll: true,
+  scroll: false,
 }
 
 /** Arguments of the poll endpoint: the caller's last seen palette version. */

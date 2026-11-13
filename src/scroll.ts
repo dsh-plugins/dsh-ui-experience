@@ -11,16 +11,29 @@
  *
  * Taking over `scrollTo` / `scrollBy` as well would break the chat transcript.
  * Its follow controller sets a target, then settles on `scrollend`; measured in
- * Chrome 156, a native smooth scroll delivers 56 `scroll` and exactly 1
- * `scrollend`, while writing `scrollTop` once per animation frame delivers 21 and
- * **21** — the browser ends each instant scroll on its own. The controller reads
- * the first of those as "the reader stopped short" and drops follow intent on the
- * first frame. There is no way for this layer to suppress those events, so the
- * calls that feed that loop stay native.
+ * Chrome 156 over the same 1200px travel, a native smooth scroll delivers 56
+ * `scroll` events and exactly 1 `scrollend`, while writing `scrollTop` once per
+ * animation frame delivers 21 and **21** — the browser ends each instant scroll on
+ * its own. The controller reads the first of those as "the reader stopped short"
+ * and drops follow intent on the first frame. The calls that feed that loop
+ * therefore stay native.
  *
  * `scrollIntoView` is the one-shot family instead — reveal a trajectory row,
- * centre a plugin card — where a single gesture is expected to end in one place
- * and no consumer is counting end-of-scroll events to infer intent.
+ * centre a plugin card, jump to a session-inspector node.
+ *
+ * KNOWN CONSEQUENCE, AND WHY THIS SHIPS OFF
+ *
+ * Those per-frame `scrollend` events reach every listener on the page, and one
+ * shipping consumer does count them: the session inspector's reveal highlights a
+ * node once scrolling settles (`reveal.ts` → `onEnd` → `finish`). Measured against
+ * the built bundle in Chrome 156, its settle callback fires at 1 ms with the
+ * scrollport still at its origin, so the highlight is placed on a row that has not
+ * arrived yet. The instant jump also contributes one `scroll`/`scrollend` pair
+ * before the first animation frame, which is enough on its own.
+ *
+ * There is no way for this layer to keep the timing and deny those events, so the
+ * setting defaults to off. Turning it on is a deliberate trade: locating jumps on
+ * the page curve, at the cost of any consumer that settles on `scrollend`.
  *
  * Two rules are fixed and are not configurable:
  *
@@ -96,9 +109,10 @@ const FREE_PX = 240
 const GROWTH_MS_PER_PX = 0.2
 
 /**
- * Movement under this many pixels is not a movement to animate. `scrollTop` is
- * snapped to whole pixels by the browser (measured: assigning 1234.5 reads back
- * 1235), so comparing raw floats would swallow a real one-pixel step.
+ * Slack for comparing two positions that both came back from the browser. They
+ * are already quantized to its pixel grid (measured: assigning 1234.5 reads back
+ * 1235 at dpr 1, 0.6666 at dpr 1.5), so this only absorbs a fractional device
+ * pixel at dpr 2, where the grid step is 0.5.
  */
 const MOTION_EPSILON = 0.5
 
@@ -111,8 +125,17 @@ const SCROLL_KEYS = new Set([
   'PageUp', 'PageDown', 'Home', 'End', ' ',
 ])
 
-/** Fields where those keys edit text instead of scrolling. */
-const EDITABLE = 'input, textarea, select, [contenteditable=""], [contenteditable="true"], [contenteditable="plaintext-only"]'
+/** Fields where those keys edit text instead of scrolling. A checkbox or a
+ *  button is an `input` too, but a scroll key over one still scrolls the page. */
+const EDITABLE = [
+  'input:not([type=checkbox]):not([type=radio]):not([type=button])',
+  ':not([type=submit]):not([type=reset]):not([type=file]):not([type=range])',
+  'textarea', 'select',
+  '[contenteditable=""]', '[contenteditable="true"]', '[contenteditable="plaintext-only"]',
+].join(', ')
+
+/** Inputs that mean the reader has taken over the container. */
+const TAKEOVER_EVENTS = ['wheel', 'touchstart', 'keydown'] as const
 
 declare const Element: {
   prototype: ElementLike
@@ -191,7 +214,8 @@ export function createScrollMotion(): {
   apply(settings: MotionSettings): void
   restore(): void
 } {
-  const shipped = Element.prototype.scrollIntoView
+  const shipped = Element.prototype.scrollIntoView as unknown as
+    (this: ElementLike, ...args: unknown[]) => Promise<void> | undefined
   let settings: MotionSettings | undefined
   let run: Run | undefined
   let installed = false
@@ -214,22 +238,30 @@ export function createScrollMotion(): {
     if (active === undefined) return
     const elapsed = now - active.started
     const progress = active.duration <= 0 ? 1 : Math.min(1, elapsed / active.duration)
-    const eased = easeCurve(effectCurvePoints(settings?.mode ?? 'm3e'), progress)
+    const eased = easeCurve(effectCurvePoints((settings as MotionSettings).mode), progress)
+    // Check every leg before writing any of them: writing an inner container can
+    // move an ancestor through scroll anchoring, and a check interleaved with the
+    // writes would read that as the reader having taken over.
     for (let index = 0; index < active.legs.length; index += 1) {
       const leg = active.legs[index]
       const written = active.written[index]
       if (leg === undefined || written === undefined) continue
-      // Something else moved this container: the reader took over, or it reflowed.
-      // Either way the run's target is no longer the place anyone asked for.
       if (Math.abs(leg.element.scrollTop - written.top) > FOREIGN_TOLERANCE
         || Math.abs(leg.element.scrollLeft - written.left) > FOREIGN_TOLERANCE) {
         cancel()
         return
       }
+    }
+    for (const leg of active.legs) {
       const top = progress >= 1 ? leg.toTop : leg.fromTop + (leg.toTop - leg.fromTop) * eased
       const left = progress >= 1 ? leg.toLeft : leg.fromLeft + (leg.toLeft - leg.fromLeft) * eased
       if (leg.element.scrollTop !== top) leg.element.scrollTop = top
       if (leg.element.scrollLeft !== left) leg.element.scrollLeft = left
+    }
+    for (let index = 0; index < active.legs.length; index += 1) {
+      const leg = active.legs[index]
+      const written = active.written[index]
+      if (leg === undefined || written === undefined) continue
       written.top = leg.element.scrollTop
       written.left = leg.element.scrollLeft
     }
@@ -251,11 +283,9 @@ export function createScrollMotion(): {
    */
   function start(legs: readonly Leg[], done: () => void): void {
     cancel()
-    const active = settings
-    if (active === undefined) {
-      done()
-      return
-    }
+    // `apply` only installs the patch when it has settings, so a run cannot begin
+    // without them.
+    const active = settings as MotionSettings
     run = {
       legs,
       started: performance.now(),
@@ -268,8 +298,7 @@ export function createScrollMotion(): {
 
   /** Whether the reduced-motion policy asks for instant travel. */
   function wantsInstant(): boolean {
-    const active = settings
-    if (active === undefined) return true
+    const active = settings as MotionSettings
     if (active.reduced === 'always') return true
     return active.reduced === 'system' && window.matchMedia('(prefers-reduced-motion: reduce)').matches
   }
@@ -288,22 +317,16 @@ export function createScrollMotion(): {
    * `length` of 0; a library that inspects the signature still sees what it
    * expects.
    */
-  function patchedScrollIntoView(this: ElementLike, ...args: unknown[]): Promise<void> | undefined {
+  function scrollIntoView(this: ElementLike, ...args: unknown[]): Promise<void> | undefined {
     const options = args[0]
     const requested = typeof options === 'object' && options !== null
       ? options as ScrollIntoViewOptions
       : undefined
     const active = settings
-    if (active === undefined || requested?.behavior !== 'smooth') {
-      shipped.apply(this, args as [] | [boolean | ScrollIntoViewOptions | undefined])
-      return undefined
-    }
+    if (active === undefined || requested?.behavior !== 'smooth') return shipped.apply(this, args)
     const jump: ScrollIntoViewOptions = { ...requested, behavior: 'instant' }
     // Reduced motion turns a smooth reveal into the jump it would have been.
-    if (wantsInstant()) {
-      shipped.call(this, jump)
-      return undefined
-    }
+    if (wantsInstant()) return shipped.call(this, jump)
     const tracked = containers(this)
     const before = tracked.map(element => ({ top: element.scrollTop, left: element.scrollLeft }))
     shipped.call(this, jump)
@@ -354,8 +377,8 @@ export function createScrollMotion(): {
   function install(): void {
     if (installed) return
     installed = true
-    ;(Element.prototype as unknown as Record<string, unknown>).scrollIntoView = patchedScrollIntoView
-    for (const kind of ['wheel', 'touchstart', 'keydown'] as const) {
+    ;(Element.prototype as unknown as Record<string, unknown>).scrollIntoView = scrollIntoView
+    for (const kind of TAKEOVER_EVENTS) {
       window.addEventListener(kind, onTakeover, { capture: true, passive: true })
     }
   }
@@ -366,7 +389,7 @@ export function createScrollMotion(): {
     if (!installed) return
     installed = false
     ;(Element.prototype as unknown as Record<string, unknown>).scrollIntoView = shipped
-    for (const kind of ['wheel', 'touchstart', 'keydown'] as const) {
+    for (const kind of TAKEOVER_EVENTS) {
       window.removeEventListener(kind, onTakeover, true)
     }
   }
