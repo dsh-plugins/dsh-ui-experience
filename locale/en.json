@@ -1,0 +1,7 @@
+{
+  "meta": {
+    "title": "UI experience",
+    "description": "UI experience enhancements: apply the system matugen Material You palette as the interface theme. Pick Matugen in the appearance row under Settings → General; the palette follows whenever matugen regenerates its colors file.",
+    "detail": "docs/DETAIL.md"
+  }
+}

@@ -1,0 +1,7 @@
+{
+  "meta": {
+    "title": "界面体验",
+    "description": "界面体验增强：读取系统 matugen 生成的 Material You 配色并应用为界面主题。在「设置 → 通用设置」的外观行点击 Matugen 即可切换；配色文件更新后界面自动跟随。",
+    "detail": "docs/DETAIL.md"
+  }
+}

@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <defs>
+    <linearGradient id="dsh-uix-icon-ring" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#f6bc70"/>
+      <stop offset="0.5" stop-color="#dec2a2"/>
+      <stop offset="1" stop-color="#bacd9f"/>
+    </linearGradient>
+  </defs>
+  <circle cx="32" cy="32" r="26" fill="none" stroke="url(#dsh-uix-icon-ring)" stroke-width="6"/>
+  <circle cx="32" cy="32" r="12" fill="#251e17"/>
+  <circle cx="32" cy="32" r="5" fill="#f6bc70"/>
+</svg>
