@@ -63,6 +63,8 @@ interface FamilySpec {
   readonly duration: 'transition-duration' | 'animation-duration'
   readonly timing: 'transition-timing-function' | 'animation-timing-function'
   readonly iterations?: 'animation-iteration-count'
+  /** Present for animations: a non-default timeline means scroll- or view-driven. */
+  readonly timeline?: 'animation-timeline'
 }
 
 const TRANSITIONS: FamilySpec = {
@@ -76,6 +78,7 @@ const ANIMATIONS: FamilySpec = {
   duration: 'animation-duration',
   timing: 'animation-timing-function',
   iterations: 'animation-iteration-count',
+  timeline: 'animation-timeline',
 }
 
 /** The duration custom properties the shipped sheets reference. */
@@ -262,9 +265,12 @@ export function createMotion(): MotionRuntime {
     const iterations = family.iterations === undefined
       ? []
       : splitList(declaration.getPropertyValue(family.iterations))
+    const timelines = family.timeline === undefined
+      ? []
+      : splitList(declaration.getPropertyValue(family.timeline))
     if (selectors.length === 0 && durations.length === 0 && timings.length === 0) return false
 
-    const count = Math.max(selectors.length, durations.length, timings.length, 1)
+    const count = Math.max(selectors.length, durations.length, timings.length, timelines.length, 1)
     const nextTimings: string[] = []
     const nextDurations: string[] = []
     let timingChanged = false
@@ -276,10 +282,19 @@ export function createMotion(): MotionRuntime {
       const originalDuration = entryAt(durations, index)
       const originalMs = originalDuration === undefined ? undefined : parseDurationMs(originalDuration)
       const infinite = entryAt(iterations, index) === 'infinite'
+      const timeline = entryAt(timelines, index)
+
+      // A scroll- or view-driven animation takes its progress from a scroll
+      // container, not from a clock, so its timing function is not a curve over
+      // time — it warps the scroll position onto the iteration progress. Easing
+      // it would make a mask fade finish early in the scroll and then hold, which
+      // is a change to the effect rather than to its feel. `auto` and `none` mean
+      // a normal document timeline, which is what this layer is for.
+      const scrollDriven = timeline !== undefined && timeline !== 'auto' && timeline !== 'none'
 
       // `none` disables the slot, so its timing and duration are inert; they keep
       // whatever they had rather than being rewritten for no effect.
-      if (selector === 'none') {
+      if (selector === 'none' || scrollDriven) {
         if (originalTiming !== undefined) nextTimings.push(originalTiming)
         if (originalDuration !== undefined) nextDurations.push(originalDuration)
         continue
