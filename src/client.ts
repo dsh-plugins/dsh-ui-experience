@@ -759,7 +759,6 @@ function registerClient(): void {
         /**
          * Checkbox row, mirroring the `Checkbox` primitive: a native input so the
          * platform draws and keys it, tinted with the brand accent.
-         * @param id - the input id.
          * @param checked - current state.
          * @param set - receives the next state.
          * @param label - the visible label.
@@ -768,12 +767,11 @@ function registerClient(): void {
          * @returns the label element.
          */
         const checkbox = (
-          id: string, checked: boolean, set: (next: boolean) => void,
+          checked: boolean, set: (next: boolean) => void,
           label: string, hint: string | undefined, disabled: boolean,
         ): unknown =>
-          h('label', { className: 'dsh-uix-check', htmlFor: id },
+          h('label', { className: 'dsh-uix-check' },
             h('input', {
-              id,
               type: 'checkbox',
               checked,
               disabled,
@@ -914,13 +912,13 @@ function registerClient(): void {
 
           const policy = open
             ? h('div', { className: 'dsh-uix-form' },
-              checkbox('dsh-uix-motion-split', current.spatialSplit,
+              checkbox(current.spatialSplit,
                 next => { void saveMotion({ spatialSplit: next }) },
                 tr('motion.spatial-split'), tr('motion.spatial-split-hint'), locked),
-              checkbox('dsh-uix-motion-quantize', current.quantize,
+              checkbox(current.quantize,
                 next => { void saveMotion({ quantize: next }) },
                 tr('motion.quantize'), tr('motion.quantize-hint'), locked),
-              checkbox('dsh-uix-motion-reduced', current.reduced === 'always',
+              checkbox(current.reduced === 'always',
                 next => { void saveMotion({ reduced: next ? 'always' : 'system' }) },
                 tr('motion.reduced'), tr('motion.reduced-hint'), locked),
             )
