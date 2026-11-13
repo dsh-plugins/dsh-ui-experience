@@ -26,12 +26,15 @@ pnpm build
 
 本机开发时作为 profile 依赖以 `link:` 方式引入（详见 [docs/DETAIL.md](docs/DETAIL.md)）。
 
-其他设备从 git 安装时，在 profile 的 `package.json` 依赖中**必须写显式别名**，否则 pnpm 会从 SSH 地址中取出错误的包名（如 `git`）：
+其他设备通过「插件管理器 → 添加插件 → 安装第三方插件」安装，粘贴 Git 仓库地址：
 
-```json
-{
-  "dependencies": {
-    "@local/dsh-ui-experience": "git+ssh://git@git.mclans.ink:10022/projectai/dsh-ui-experience.git"
-  }
-}
 ```
+git+ssh://git@git.mclans.ink:10022/projectai/dsh-ui-experience.git
+```
+
+注意：
+
+- 地址必须以 `git+ssh://` 开头；裸 `ssh://` 不会被识别为 Git 仓库。
+- 目标设备需要能访问该仓库（SSH 密钥已配置）。
+- 构建产物 `lib/` 已入库，无需在目标设备上构建；安装后按提示重启 DSH。
+- 不要手动编辑 profile 的 `package.json`：缺少别名时 pnpm 会从 SSH 地址中取出错误的包名（如 `git`），导致模块解析失败。
