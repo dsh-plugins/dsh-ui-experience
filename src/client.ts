@@ -14,6 +14,7 @@ import {
   type PalettePaths, type PollArgs, type PollResult, type SetActiveArgs, type SetActiveResult,
   type SetPathsArgs, type SetPathsResult, type ThemeTokenModes,
 } from './shared.ts'
+import { ROW_CSS } from './styles.ts'
 
 /** Minimal React face the bundle uses (the real React arrives from the loader). */
 interface ReactLike {
@@ -197,45 +198,6 @@ const DICTS: Record<string, Record<string, string>> = {
   },
 }
 
-/**
- * Row styles. The switch, input, and buttons mirror the host controls of the
- * same kind: sizes, radii, and states are copied from the host's compiled
- * `Switch` and text-field rules, and every value is a theme token so the row
- * follows both the built-in palettes and the matugen overlay. Classes carry the
- * plugin prefix and nothing here depends on a host package.
- */
-const CSS = `
-.dsh-uix-row{display:block;padding:16px 0;border-bottom:0.5px solid var(--dsw-alias-border-l2)}
-.dsh-uix-head{display:flex;align-items:center;justify-content:space-between;gap:24px}
-.dsh-uix-text{min-width:0}
-.dsh-uix-title{font-size:14px;line-height:22px}
-.dsh-uix-desc{margin-top:4px;color:var(--dsw-alias-label-secondary);font-size:12px;line-height:18px}
-.dsh-uix-error{margin-top:6px;font-size:12px;line-height:18px;color:var(--dsw-alias-state-error-primary)}
-.dsh-uix-notice{margin-top:6px;font-size:12px;line-height:18px;color:var(--dsw-alias-state-success-primary)}
-.dsh-uix-disclosure{margin-top:8px;padding:0;border:0;background:none;color:var(--dsw-alias-label-secondary);font-size:12px;line-height:18px;cursor:pointer}
-.dsh-uix-disclosure:hover{color:var(--dsw-alias-label-primary)}
-.dsh-uix-disclosure:focus-visible{outline:var(--dsw-focus-ring-width) solid var(--dsw-alias-state-business-primary);outline-offset:2px;border-radius:4px}
-.dsh-uix-paths{margin-top:10px;display:flex;flex-direction:column;gap:10px;padding:12px;border-radius:8px;background:var(--dsw-alias-bg-layer-1)}
-.dsh-uix-field{display:flex;flex-direction:column;gap:4px}
-.dsh-uix-label{font-size:12px;line-height:18px;color:var(--dsw-alias-label-secondary)}
-.dsh-uix-input{box-sizing:border-box;width:100%;height:32px;padding:0 10px;border-radius:6px;border:1px solid var(--dsw-alias-border-l2);background:var(--dsw-specific-input-major);color:var(--dsw-alias-label-primary);font-family:var(--dsw-font-family,monospace);font-size:12px;outline:none}
-.dsh-uix-input:focus-visible{border-color:var(--dsw-alias-brand-primary);outline:var(--dsw-focus-ring-width) solid var(--dsw-alias-state-business-primary);outline-offset:1px}
-.dsh-uix-actions{display:flex;gap:8px}
-.dsh-uix-button{height:28px;padding:0 12px;border-radius:6px;border:1px solid var(--dsw-alias-border-l2);background:transparent;color:var(--dsw-alias-label-primary);font-family:inherit;font-size:12px;cursor:pointer}
-.dsh-uix-button:hover:enabled{background:var(--dsw-alias-interactive-bg-hover)}
-.dsh-uix-button:focus-visible{outline:var(--dsw-focus-ring-width) solid var(--dsw-alias-state-business-primary);outline-offset:2px}
-.dsh-uix-button-primary{border-color:transparent;background:var(--dsw-alias-button-primary-fill);color:var(--dsw-alias-label-on-color)}
-.dsh-uix-button:disabled{opacity:.5;cursor:default}
-.dsh-uix-hint{font-size:12px;line-height:18px;color:var(--dsw-alias-label-tertiary)}
-.dsh-uix-switch{box-sizing:border-box;position:relative;flex:0 0 auto;width:36px;height:20px;padding:2px;border:0;border-radius:999px;background:var(--dsw-alias-border-l3);cursor:pointer}
-.dsh-uix-switch[aria-checked=true]{background:var(--dsw-alias-brand-primary)}
-.dsh-uix-switch:disabled{cursor:default;opacity:.5}
-.dsh-uix-switch:focus-visible{outline:var(--dsw-focus-ring-width) solid var(--dsw-alias-state-business-primary);outline-offset:2px}
-.dsh-uix-switch-thumb{display:block;width:16px;height:16px;border-radius:50%;background:var(--dsw-alias-label-primary-foreground);transition:transform .12s ease}
-.dsh-uix-switch[aria-checked=false] .dsh-uix-switch-thumb{background:var(--dsw-alias-switch-thumb)}
-.dsh-uix-switch[aria-checked=true] .dsh-uix-switch-thumb{transform:translate(16px)}
-`
-
 function registerClient(): void {
   window.__ModuleLoader__.load({
     id: SOURCE,
@@ -256,7 +218,7 @@ function registerClient(): void {
         ctx.effect(() => ctx.locale.register('ui-experience', DICTS), 'ui-experience: dictionaries')
         ctx.effect(() => {
           const sheet = document.createElement('style')
-          sheet.textContent = CSS
+          sheet.textContent = ROW_CSS
           document.head.appendChild(sheet)
           return () => { sheet.remove() }
         }, 'ui-experience: row styles')
@@ -568,12 +530,14 @@ function registerClient(): void {
           }, [state.paths])
 
           const status = state.problem !== ''
-            ? h('div', { className: 'dsh-uix-error', role: 'alert' }, state.problem)
+            ? h('p', { className: 'dsh-uix-problem', role: 'alert' }, state.problem)
             : state.notice !== ''
-              ? h('div', { className: 'dsh-uix-notice' }, state.notice)
+              ? h('p', { className: 'dsh-uix-notice' }, state.notice)
               : null
 
-          const field = (label: string, value: string, placeholder: string, set: (next: string) => void): unknown =>
+          const field = (
+            label: string, value: string, placeholder: string, set: (next: string) => void, hint?: unknown,
+          ): unknown =>
             h('label', { className: 'dsh-uix-field' },
               h('span', { className: 'dsh-uix-label' }, label),
               h('input', {
@@ -584,27 +548,28 @@ function registerClient(): void {
                 spellCheck: false,
                 onChange: (event: { target: { value: string } }) => { set(event.target.value) },
               }),
+              hint ?? null,
             )
 
           const editor = open
-            ? h('div', { className: 'dsh-uix-paths' },
+            ? h('div', { className: 'dsh-uix-form' },
               field(tr('palette.colors-path'), colors, DEFAULT_COLORS_PATH, setColors),
-              field(tr('palette.tokens-path'), tokens, DEFAULT_TOKENS_PATH, setTokens),
-              h('div', { className: 'dsh-uix-actions' },
+              field(tr('palette.tokens-path'), tokens, DEFAULT_TOKENS_PATH, setTokens,
+                h('p', { className: 'dsh-uix-hint' }, tr('palette.paths-hint'))),
+              h('div', { className: 'dsh-uix-footer' },
                 h('button', {
                   type: 'button',
-                  className: 'dsh-uix-button dsh-uix-button-primary',
+                  className: 'dsh-uix-save',
                   disabled: state.saving,
                   onClick: () => { void savePaths(colors.trim(), tokens.trim()) },
                 }, tr('palette.save')),
                 h('button', {
                   type: 'button',
-                  className: 'dsh-uix-button',
+                  className: 'dsh-uix-reset',
                   disabled: state.saving,
                   onClick: () => { void savePaths(DEFAULT_COLORS_PATH, DEFAULT_TOKENS_PATH) },
                 }, tr('palette.reset')),
               ),
-              h('div', { className: 'dsh-uix-hint' }, tr('palette.paths-hint')),
             )
             : null
 
