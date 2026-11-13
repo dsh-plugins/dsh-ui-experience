@@ -1,0 +1,10 @@
+{
+  "name": "@dsh-plugin/dsh-ui-experience",
+  "latest": "0.0.1",
+  "publishedAt": "2026-11-13T18:07:47.166Z",
+  "dist": {
+    "tarball": "https://registry.npmjs.org/@dsh-plugin/dsh-ui-experience/-/dsh-ui-experience-0.0.1.tgz",
+    "integrity": "sha512-WNLO6EjORwsaxdaOLXC7lFreZFp/Q1Po85YSRwiIwcaYi1+tNIz7tG6rBhwnBdpceqKp2SPFhCjRV9LcNjOuCg==",
+    "unpackedSize": 60900
+  }
+}
