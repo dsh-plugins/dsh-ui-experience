@@ -125,6 +125,35 @@ interface EventLike {
   stopImmediatePropagation(): void
 }
 
+/** The wheel fields this layer reads. */
+interface WheelLike extends EventLike {
+  readonly deltaX: number
+  readonly deltaY: number
+  readonly deltaMode: number
+  readonly ctrlKey: boolean
+  readonly metaKey: boolean
+  /** Set by a handler closer to the target that already took this notch. */
+  readonly defaultPrevented: boolean
+  preventDefault(): void
+}
+
+/** A wheel stream being eased toward its accumulated target. */
+interface WheelRun {
+  readonly element: ElementLike
+  top: number
+  left: number
+  frame: number
+  started: number
+}
+
+/** The native `scrollTop` / `scrollLeft` accessors, captured before patching. */
+interface AxisAccessor {
+  readonly get: (this: ElementLike) => number
+  readonly set: (this: ElementLike, value: number) => void
+  readonly enumerable: boolean
+  readonly configurable: boolean
+}
+
 /** Shortest scripted scroll; below this the motion reads as a jump anyway. */
 const MIN_MS = 180
 /** Longest scripted scroll, so a full-pane jump never drags. */
@@ -172,15 +201,42 @@ const EDITABLE = [
 /** Inputs that mean the reader has taken over the container. */
 const TAKEOVER_EVENTS = ['wheel', 'touchstart', 'keydown'] as const
 
+/**
+ * Shortest travel this layer turns into an animation when a caller asks for an
+ * immediate jump. Anything smaller is a layout correction — a measurement cached
+ * a pixel ago, an anchoring fix, a follow that is already at the floor — and
+ * animating those would leave the viewport chasing its own content.
+ */
+const JUMP_ANIMATE_MIN = 24
+
+/**
+ * Fraction of the remaining wheel distance covered per frame. Exponential decay
+ * rather than a curve: a wheel arrives as a stream of directions, and a fixed
+ * duration would restart on every notch.
+ */
+const WHEEL_DECAY = 0.22
+
+/** Wheel travel below this lands immediately, so the stream can end. */
+const WHEEL_SETTLE_PX = 0.5
+
+/** How long a wheel run may coast after the last notch before it is cut short. */
+const WHEEL_MAX_MS = 900
+
 declare const Element: {
   prototype: ElementLike
   new (): ElementLike
 }
 declare const Event: new (type: string, init?: { bubbles?: boolean }) => unknown
+
+/** The listener-options shape this file passes to `addEventListener`. */
+interface AddEventListenerOptionsLike {
+  capture: boolean
+  passive: boolean
+}
 declare const window: {
   requestAnimationFrame(callback: (time: number) => void): number
   cancelAnimationFrame(handle: number): void
-  addEventListener(kind: string, listener: (event: EventLike) => void, capture: boolean | { capture: boolean; passive: boolean }): void
+  addEventListener(kind: string, listener: (event: never) => void, capture: boolean | AddEventListenerOptionsLike): void
   removeEventListener(kind: string, listener: (event: EventLike) => void, capture: boolean): void
   matchMedia(query: string): { readonly matches: boolean }
 }
@@ -255,9 +311,15 @@ export function createScrollMotion(): {
     scrollBy: Element.prototype.scrollBy as (this: ElementLike, ...args: unknown[]) => Promise<void> | undefined,
     scrollIntoView: Element.prototype.scrollIntoView as (this: ElementLike, ...args: unknown[]) => Promise<void> | undefined,
   }
+  /** The shipped axis accessors, captured so internal writes bypass the patch. */
+  const topAxis = Object.getOwnPropertyDescriptor(Element.prototype, 'scrollTop') as unknown as AxisAccessor | undefined
+  const leftAxis = Object.getOwnPropertyDescriptor(Element.prototype, 'scrollLeft') as unknown as AxisAccessor | undefined
   let settings: MotionSettings | undefined
   let run: Run | undefined
+  let wheel: WheelRun | undefined
   let installed = false
+  /** Non-zero while this layer writes a position, so its own patches stay out of the way. */
+  let writing = 0
   /**
    * Containers whose real `scrollend` is withheld right now, and until when.
    * `Infinity` means "for as long as the run moves it"; a timestamp means "this
@@ -282,6 +344,29 @@ export function createScrollMotion(): {
    * own end swallowed, so the same members are listed here to be cleared.
    */
   const graceful = new Set<ElementLike>()
+
+  /**
+   * Write an offset without going through this layer's own patches.
+   * @param element - the container.
+   * @param axis - which axis to write.
+   * @param value - the offset.
+   */
+  function writeAxis(element: ElementLike, axis: 'top' | 'left', value: number): void {
+    const accessor = axis === 'top' ? topAxis : leftAxis
+    if (accessor !== undefined) {
+      writing += 1
+      try {
+        accessor.set.call(element, value)
+      } finally {
+        writing -= 1
+      }
+      return
+    }
+    // No accessor means the property lives somewhere other than the prototype;
+    // assigning plainly is the only thing left, and it is still correct.
+    if (axis === 'top') element.scrollTop = value
+    else element.scrollLeft = value
+  }
 
   /** Stop withholding ends from every container still inside the grace window. */
   function clearGrace(): void {
@@ -336,6 +421,7 @@ export function createScrollMotion(): {
    * @param notify - whether its containers owe their consumer an end.
    */
   function cancel(notify = true): void {
+    stopWheel()
     const active = run
     if (active === undefined) return
     window.cancelAnimationFrame(active.frame)
@@ -371,8 +457,8 @@ export function createScrollMotion(): {
     for (const leg of active.legs) {
       const top = progress >= 1 ? leg.toTop : leg.fromTop + (leg.toTop - leg.fromTop) * eased
       const left = progress >= 1 ? leg.toLeft : leg.fromLeft + (leg.toLeft - leg.fromLeft) * eased
-      if (leg.element.scrollTop !== top) leg.element.scrollTop = top
-      if (leg.element.scrollLeft !== left) leg.element.scrollLeft = left
+      if (leg.element.scrollTop !== top) writeAxis(leg.element, 'top', top)
+      if (leg.element.scrollLeft !== left) writeAxis(leg.element, 'left', left)
     }
     for (let index = 0; index < active.legs.length; index += 1) {
       const leg = active.legs[index]
@@ -451,6 +537,123 @@ export function createScrollMotion(): {
     return active.reduced === 'system' && window.matchMedia('(prefers-reduced-motion: reduce)').matches
   }
 
+  /** Stop the wheel run without landing, leaving the viewport where it is. */
+  function stopWheel(): void {
+    const active = wheel
+    if (active === undefined) return
+    window.cancelAnimationFrame(active.frame)
+    wheel = undefined
+    release(active.element, true)
+  }
+
+  /**
+   * One wheel frame: close a fixed fraction of the remaining distance, so the
+   * stream slows as it lands and a new notch simply adds to the remainder.
+   * @param now - the frame timestamp the browser supplies.
+   */
+  function wheelStep(now: number): void {
+    const active = wheel
+    if (active === undefined) return
+    const element = active.element
+    const max = maxima(element)
+    const top = element.scrollTop
+    const left = element.scrollLeft
+    const gapTop = Math.min(max.top, Math.max(0, active.top)) - top
+    const gapLeft = Math.min(max.left, Math.max(0, active.left)) - left
+    const remaining = Math.max(Math.abs(gapTop), Math.abs(gapLeft))
+    const expired = now - active.started > WHEEL_MAX_MS
+    if (remaining <= WHEEL_SETTLE_PX || expired) {
+      wheel = undefined
+      release(element, true)
+      return
+    }
+    writeAxis(element, 'top', top + gapTop * WHEEL_DECAY)
+    writeAxis(element, 'left', left + gapLeft * WHEEL_DECAY)
+    active.frame = window.requestAnimationFrame(wheelStep)
+  }
+
+  /**
+   * Ease a wheel notch onto its landing position.
+   *
+   * The browser applies wheel deltas itself, so this cannot be a `scroll` patch:
+   * what it can do is take the delta the page is about to apply and drive the
+   * same distance on the effect curve instead of instantly.
+   *
+   * @param event - the wheel event.
+   * @returns whether this layer took the notch.
+   */
+  function onWheel(event: WheelLike): boolean {
+    const active = settings
+    if (active === undefined) return false
+    // Zoom gestures arrive as ctrl+wheel and must keep their native meaning, and
+    // a coarse (line/page) delta has no pixel distance to ease.
+    if (event.ctrlKey || event.metaKey || event.deltaMode !== 0) return false
+    if (wantsInstant()) return false
+    const target = event.target
+    if (target === null) return false
+    // Text fields scroll themselves while the reader edits; easing that fights the
+    // caret. Anything else the app explicitly claimed is already gone by here.
+    if (target instanceof Element && target.closest(EDITABLE) !== null) return false
+    const element = scrollportOf(target as unknown as ElementLike)
+    if (element === null) return false
+    const max = maxima(element)
+    if (max.top <= 0 && max.left <= 0) return false
+    const base = wheel?.element === element ? wheel : undefined
+    const fromTop = element.scrollTop
+    const fromLeft = element.scrollLeft
+    const top = Math.min(max.top, Math.max(0, (base?.top ?? fromTop) + event.deltaY))
+    const left = Math.min(max.left, Math.max(0, (base?.left ?? fromLeft) + event.deltaX))
+    if (Math.abs(top - fromTop) < WHEEL_SETTLE_PX && Math.abs(left - fromLeft) < WHEEL_SETTLE_PX) return false
+    event.preventDefault()
+    // A wheel notch supersedes whatever was animating: the reader is in charge.
+    const stopped = run
+    if (stopped !== undefined) {
+      window.cancelAnimationFrame(stopped.frame)
+      run = undefined
+      for (const leg of stopped.legs) release(leg.element, true)
+      for (const settle of stopped.done) settle()
+    }
+    const streaming = base !== undefined
+    if (!streaming) {
+      hold(element)
+      wheel = { element, top, left, frame: 0, started: performance.now() }
+    } else {
+      wheel = { ...base, top, left }
+    }
+    window.cancelAnimationFrame(wheel.frame)
+    wheel.frame = window.requestAnimationFrame(wheelStep)
+    return true
+  }
+
+  /**
+   * The nearest ancestor that can scroll, starting at the event target itself.
+   * @param node - the event target.
+   * @returns the scroll container, or null.
+   */
+  function scrollportOf(node: ElementLike | null): ElementLike | null {
+    let current = node
+    while (current !== null) {
+      const max = maxima(current)
+      if (max.top > 0 || max.left > 0) return current
+      current = current.parentElement
+    }
+    return null
+  }
+
+  /**
+   * Whether a caller's immediate jump should be animated. Only a request that
+   * says "instant" and asks for real travel qualifies; a plain property write or
+   * an `auto` request stays immediate, because layout code uses those for
+   * corrections where a delayed position would be a bug rather than a nicety.
+   * @param behavior - the requested behavior.
+   * @param distance - how far the request would move each axis.
+   * @returns whether to animate it.
+   */
+  function animates(behavior: ScrollToOptions['behavior'], distance: { top: number; left: number }): boolean {
+    return behavior === 'instant'
+      && Math.max(distance.top, distance.left) >= JUMP_ANIMATE_MIN
+  }
+
   /**
    * The patched `scrollIntoView`.
    *
@@ -489,8 +692,8 @@ export function createScrollMotion(): {
       const landed = { top: element.scrollTop, left: element.scrollLeft }
       // Put the container back before anything paints, then animate to the place
       // the browser said it belonged.
-      element.scrollTop = origin.top
-      element.scrollLeft = origin.left
+      writeAxis(element, 'top', origin.top)
+      writeAxis(element, 'left', origin.left)
       const moved = Math.abs(landed.top - origin.top) > MOTION_EPSILON
         || Math.abs(landed.left - origin.left) > MOTION_EPSILON
       if (!moved) {
@@ -563,11 +766,13 @@ export function createScrollMotion(): {
     shippedMethod: (this: ElementLike, ...rest: unknown[]) => Promise<void> | undefined,
     relative: boolean,
   ): Promise<void> | undefined {
+    // This layer's own writes and a caller's re-entrant write during one must not
+    // be eased again.
+    if (writing > 0) return shippedMethod.apply(element, args)
     const options = args[0] as ScrollToOptions | number | undefined
     const behavior = typeof options === 'object' && options !== null ? options.behavior : undefined
     const active = settings
-    if (active === undefined || behavior !== 'smooth') return shippedMethod.apply(element, args)
-    if (wantsInstant()) return shippedMethod.apply(element, args)
+    if (active === undefined || wantsInstant()) return shippedMethod.apply(element, args)
     const base = relative
       ? { top: element.scrollTop, left: element.scrollLeft }
       : { top: 0, left: 0 }
@@ -575,10 +780,24 @@ export function createScrollMotion(): {
     const leg = legFor(element, request.top, request.left)
     // A request that changes nothing still resolves, like the native call.
     if (leg === undefined) return Promise.resolve()
-    // One promise per caller, settled with whichever run finishes the travel.
-    return new Promise<void>(resolve => {
-      if (!merge([leg], resolve)) start([leg], resolve)
-    })
+    if (behavior === 'smooth') {
+      // One promise per caller, settled with whichever run finishes the travel.
+      return new Promise<void>(resolve => {
+        if (!merge([leg], resolve)) start([leg], resolve)
+      })
+    }
+    if (!animates(behavior, {
+      top: Math.abs(leg.toTop - leg.fromTop),
+      left: Math.abs(leg.toLeft - leg.fromLeft),
+    })) {
+      // Small immediate jumps are layout corrections: they must land now, and the
+      // caller may read the position back on the next line.
+      shippedMethod.apply(element, args)
+      return Promise.resolve()
+    }
+    // A long immediate jump — a control that sends the viewport to the far end of
+    // a document — reads as movement, so it is eased like one.
+    return new Promise<void>(resolve => { start([leg], resolve) })
   }
 
   /** The patched `scrollTo`. */
@@ -632,32 +851,63 @@ export function createScrollMotion(): {
   }
 
   /**
+   * Bubble adapter for the wheel path.
+   *
+   * Bubble, not capture: several places in the app handle wheel before the
+   * viewport gets it — the draft editor forwards a notch to the transcript when
+   * it is already at its own edge, a width handle turns one into a resize scroll
+   * — and those handlers register on the element. Running last lets them claim
+   * the notch first; `defaultPrevented` is then the answer to "is this mine".
+   * @param event - the wheel event.
+   */
+  function onWheelBubble(event: WheelLike): void {
+    // A notch another handler already claimed still means the reader is scrolling,
+    // so a run on that container stops either way; only taking the notch is gated.
+    cancelIfOwned(event.target)
+    if (event.defaultPrevented) return
+    onWheel(event)
+  }
+
+  /**
    * Reader input ends the scripted run before the browser processes it, so its
    * own scrolling starts from where this layer stopped.
    * @param event - the candidate takeover event.
    */
-  function onTakeover(event: EventLike): void {
+  /**
+   * Stop a run when reader input lands on a container it is moving.
+   *
+   * One over a side panel is somebody else's scrollport and must not stop the
+   * run, and a key only scrolls when focus is not in a field that consumes it.
+   *
+   * @param target - the event target.
+   * @returns whether this input belongs to the run and was stopped.
+   */
+  function cancelIfOwned(target: EventTarget | null): boolean {
     const active = run
-    if (active === undefined) {
+    if (active === undefined || target === null) return false
+    if (!active.legs.some(leg => leg.element.contains(target))) return false
+    cancel()
+    return true
+  }
+
+  /** Route a non-wheel takeover event through the shared cancellation test. */
+  function onTakeover(event: EventLike): void {
+    const key = event.type === 'keydown'
+    if (key) {
+      // Keys scroll whatever has focus, so they are not matched against the run's
+      // containers — but a field that consumes the key does not scroll at all.
+      if (event.key === undefined || !SCROLL_KEYS.has(event.key)) return
+      const focus = event.target
+      if (focus instanceof Element && focus.closest(EDITABLE) !== null) return
+    }
+    if (run === undefined) {
       // No run to stop, but an end still owed for the last one must not be
       // withheld from the scroll this input is about to start.
       clearGrace()
       return
     }
-    if (event.type === 'keydown') {
-      // Keys scroll only when focus is not in a field that consumes them.
-      if (event.key === undefined || !SCROLL_KEYS.has(event.key)) return
-      const target = event.target
-      if (target instanceof Element && target.closest(EDITABLE) !== null) return
-      cancel()
-      return
-    }
-    // A wheel or touch only means "the reader took this container" when it lands
-    // on a container this run is moving; one over a side panel is somebody else's
-    // scrollport and must not stop the run.
-    const target = event.target
-    if (target === null || !active.legs.some(leg => leg.element.contains(target))) return
-    cancel()
+    if (key) cancel()
+    else cancelIfOwned(event.target)
   }
 
   /**
@@ -693,7 +943,12 @@ export function createScrollMotion(): {
     // Capture on the window reaches the scroller before any listener the consumer
     // registered, whether it listens on the element or on the window.
     window.addEventListener('scrollend', onScrollEnd, true)
-    for (const kind of TAKEOVER_EVENTS) {
+    // Non-passive and bubbling: a taken notch has to cancel the browser's own
+    // scroll, and every handler closer to the target gets its turn first.
+    ;(window.addEventListener as (kind: string, listener: unknown, capture: unknown) => void)(
+      'wheel', onWheelBubble, { capture: false, passive: false },
+    )
+    for (const kind of ['touchstart', 'keydown'] as const) {
       window.addEventListener(kind, onTakeover, { capture: true, passive: true })
     }
   }
@@ -714,7 +969,10 @@ export function createScrollMotion(): {
     prototype.scrollBy = shipped.scrollBy
     prototype.scrollIntoView = shipped.scrollIntoView
     window.removeEventListener('scrollend', onScrollEnd, true)
-    for (const kind of TAKEOVER_EVENTS) {
+    ;(window.removeEventListener as (kind: string, listener: unknown, capture: unknown) => void)(
+      'wheel', onWheelBubble, false,
+    )
+    for (const kind of ['touchstart', 'keydown'] as const) {
       window.removeEventListener(kind, onTakeover, true)
     }
   }
