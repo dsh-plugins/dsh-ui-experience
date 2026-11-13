@@ -180,7 +180,7 @@ const DICTS: Record<string, Record<string, string>> = {
     'palette.tokens-path': 'DSH 令牌文件（存在时优先）',
     'palette.save': '保存',
     'palette.reset': '恢复默认',
-    'palette.paths-hint': '支持以 ~ 开头的路径，或绝对路径。令牌文件存在时优先使用，否则读取颜色文件并映射。',
+    'palette.paths-hint': '支持以 ~ 开头的路径，或绝对路径。颜色文件提供完整映射，令牌文件里列出的 token 逐项覆盖。',
   },
   en: {
     'palette.title': 'Matugen palette sync',
@@ -193,7 +193,7 @@ const DICTS: Record<string, Record<string, string>> = {
     'palette.tokens-path': 'DSH token file (preferred when present)',
     'palette.save': 'Save',
     'palette.reset': 'Restore defaults',
-    'palette.paths-hint': 'Paths may start with ~, or be absolute. The token file wins when it exists; otherwise the colors file is read and mapped.',
+    'palette.paths-hint': 'Paths may start with ~, or be absolute. The colors file supplies the full mapping; tokens listed in the token file override it item by item.',
   },
 }
 

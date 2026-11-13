@@ -24,9 +24,10 @@ DeepSeek Harness 界面体验插件（`@dsh-plugin/dsh-ui-experience`，仓库�
 | 文件 | 默认路径 | 用途 |
 | --- | --- | --- |
 | 颜色文件 | `~/.local/state/quickshell/user/generated/colors.json` | matugen 原始输出；插件用内置映射把它转换为界面配色 |
-| 令牌文件 | `~/.local/state/quickshell/user/generated/dsh-tokens.json` | 由自定义 matugen 模板产出的、已映射好的 DSH token 表；**存在时优先**使用 |
+| 令牌文件 | `~/.local/state/quickshell/user/generated/dsh-tokens.json` | 由自定义 matugen 模板产出的 DSH token 表，**逐 token 叠加**在内置映射之上 |
 
-- 令牌文件优先：它存在时忽略颜色文件；删除它才回落到内置映射。
+- 两个文件是叠加关系，不是替代关系：颜色文件提供完整的内置映射，令牌文件里列出的 token 覆盖对应项，未列出的继续用映射值。只写需要的几项也能生效，不会让其余界面退回原生配色。
+- 只存在令牌文件、没有颜色文件时，未列出的 token 只能保持 DSH 内置值；插件会在日志中说明这一情况。
 - 路径必须是绝对路径，或以 `~/` 开头（`~` 按当前用户主目录展开）。
 - 「恢复默认」把两个路径重置为上表默认值。
 - 两个文件都不存在时插件不上色，界面保持原生配色。
@@ -43,13 +44,13 @@ DeepSeek Harness 界面体验插件（`@dsh-plugin/dsh-ui-experience`，仓库�
 - `overlay` 原本就位于阶梯顶端，没有更高的档位可移，因此在最亮一档上用 `color-mix(in srgb, …, white 8%)` 提亮，保持它高于其余浮层。
 - 遮罩类 token 用 `color-mix(…, transparent 50%)` 保留透明度，避免不透明的纯 `scrim` 盖住下层界面。
 
-## 颜色来源与优先级
+## 颜色来源与合成顺序
 
-1. 令牌文件 `dsh-tokens.json`：`{ "light": { … }, "dark": { … } }` 两张 DSH token 表，按当前模式分别取用，浅色与深色可以使用不同配色。
-2. 颜色文件 `colors.json`：matugen 的 Material You 颜色表，由插件内置映射转换。matugen 只给出一套暗色方案，因此浅色与深色两种模式叠加的是同一张表。
+1. **颜色文件** `colors.json`：matugen 的 Material You 颜色表，由插件内置映射转换为全部界面 token（148 项）。matugen 只给出一套暗色方案，因此浅色与深色两种模式得到同一张表。
+2. **令牌文件** `dsh-tokens.json`（可选）：叠加层。文件里列出的 token 按模式覆盖上一步的结果，未列出的保持映射值。因此可以只写关心的少数几项。
 3. 两者都不存在：不叠加配色。
 
-token 名必须以 `--dsw-` 开头；未列出的 token 保持 DSH 内置值。
+token 名必须以 `--dsw-` 开头；两边都没给的 token 保持 DSH 内置值。
 
 ## matugen 模板接入（可选）
 

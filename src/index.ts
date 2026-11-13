@@ -440,6 +440,20 @@ interface ResolvedSources {
   paths: PalettePaths
   tokensFile: string
   colorsFile: string
+  /** The dedicated token file exists, so its values layer over the mapping. */
+  hasTokens: boolean
+  /** The raw matugen colors file exists, so the built-in mapping is available. */
+  hasColors: boolean
+}
+
+/**
+ * A palette file's parsed contribution, tagged with the identity used for cache
+ * invalidation: path, mtime, and size.
+ */
+interface LoadedPart {
+  key: string
+  has: boolean
+  modes?: ThemeTokenModes
 }
 
 /**
@@ -447,31 +461,76 @@ interface ResolvedSources {
  * @param config - resolved plugin configuration.
  * @returns the resolved files, or the reason they are unusable.
  */
-function resolveSources(config: Config): { ok: true; sources: ResolvedSources; source: string | undefined }
-  | { ok: false; paths: PalettePaths; status: 'missing' | 'error'; message: string } {
+function resolveSources(config: Config): { ok: true; sources: ResolvedSources } | { ok: false; paths: PalettePaths; status: 'error'; message: string } {
   const paths = effectivePaths(config)
-  let tokensFile: string
-  let colorsFile: string
   try {
-    tokensFile = resolvePath(paths.tokens, 'tokensPath')
-    colorsFile = resolvePath(paths.colors, 'colorsPath')
+    const tokensFile = resolvePath(paths.tokens, 'tokensPath')
+    const colorsFile = resolvePath(paths.colors, 'colorsPath')
+    return {
+      ok: true,
+      sources: {
+        paths, tokensFile, colorsFile,
+        hasTokens: existsSync(tokensFile),
+        hasColors: existsSync(colorsFile),
+      },
+    }
   } catch (error) {
     return { ok: false, paths, status: 'error', message: (error as Error).message }
   }
-  const source = existsSync(tokensFile) ? tokensFile : existsSync(colorsFile) ? colorsFile : undefined
-  return { ok: true, sources: { paths, tokensFile, colorsFile }, source }
 }
 
 /**
- * Parse one palette file's bytes into per-mode token tables. The dedicated token
- * file wins over the raw matugen colors file.
- * @param source - absolute path the bytes were read from.
+ * The layer order in effect: the raw matugen mapping is the base, and the
+ * dedicated token file layers over it. A token file that omits a token therefore
+ * keeps the mapped Material value instead of dropping the token back to the
+ * built-in palette — a partial file must not punch holes in the whole theme.
  * @param sources - the resolved palette files in effect.
- * @param text - the file contents.
- * @returns the parsed token modes.
+ * @param mapped - the parsed matugen mapping, when the colors file exists.
+ * @param tokens - the parsed token document, when the token file exists.
+ * @returns the composed per-mode token tables.
  */
-function parsePalette(source: string, sources: ResolvedSources, text: string): ThemeTokenModes {
-  if (source === sources.tokensFile) return validateTokenDocument(JSON.parse(text))
+function composePalette(
+  sources: ResolvedSources, mapped: ThemeTokenModes | undefined, tokens: ThemeTokenModes | undefined,
+): ThemeTokenModes {
+  if (mapped === undefined && tokens === undefined) {
+    throw new Error(`no palette file at tokensPath (${sources.tokensFile}) or colorsPath (${sources.colorsFile})`)
+  }
+  if (mapped === undefined) return tokens!
+  if (tokens === undefined) return mapped
+  return {
+    light: { ...mapped.light, ...tokens.light },
+    dark: { ...mapped.dark, ...tokens.dark },
+  }
+}
+
+/**
+ * Record how much of the palette the dedicated token file actually covers. A
+ * sparse file is legitimate, but it silently leaves most tokens on the mapped
+ * base (or, with no colors file, on the built-in palette), which looks like the
+ * plugin doing nothing.
+ * @param composed - the composed per-mode token tables.
+ * @param tokens - the parsed token document, when present.
+ * @param mapped - the parsed matugen mapping, when present.
+ */
+function auditCoverage(composed: ThemeTokenModes, tokens: ThemeTokenModes | undefined, mapped: ThemeTokenModes | undefined): void {
+  if (tokens === undefined) return
+  const provided = Object.keys(tokens.dark).length
+  const total = Object.keys(composed.dark).length
+  if (mapped === undefined) {
+    logLine(`tokensPath has ${provided} tokens and no colorsPath base is present;`
+      + ' every other token keeps the built-in palette value')
+    return
+  }
+  logLine(`palette composed from colorsPath mapping (${Object.keys(mapped.dark).length} tokens)`
+    + ` + tokensPath overrides (${provided} tokens) = ${total} tokens`)
+}
+
+/**
+ * Parse the matugen colors file into the built-in mapping.
+ * @param text - the file contents.
+ * @returns the mapped per-mode token tables.
+ */
+function parseMapped(text: string): ThemeTokenModes {
   // matugen's colors.json carries a single (dark) scheme; both theme modes get
   // the same table, so switching light/dark only moves uncovered tokens.
   const table: ThemeTokenTable = mapColors(validateColors(JSON.parse(text)))
@@ -479,68 +538,103 @@ function parsePalette(source: string, sources: ResolvedSources, text: string): T
 }
 
 /**
+ * Load one palette part and assert its size limit.
+ * @param path - absolute file path.
+ * @param parse - turns the file text into token modes.
+ * @returns the parsed part, or undefined when the file does not exist.
+ */
+function loadPartSync(path: string, exists: boolean, parse: (text: string) => ThemeTokenModes): LoadedPart {
+  if (!exists) return { key: '-', has: false }
+  const stat = statSync(path)
+  if (stat.size > PALETTE_MAX_BYTES) {
+    throw new Error(`${path} is ${stat.size} bytes, over the ${PALETTE_MAX_BYTES} byte limit`)
+  }
+  return { key: `${path}@${stat.mtimeMs}:${stat.size}`, has: true, modes: parse(readFileSync(path, 'utf8')) }
+}
+
+/**
  * Read the palette for the pre-plugin paint. Page renders are occasional, so this
- * stays synchronous, but the file size is bounded first.
+ * stays synchronous, but each file's size is bounded first.
  * @param config - resolved plugin configuration.
  * @returns the palette, or the reason it is unavailable.
  */
 function readPaletteSync(config: Config): PaletteRead {
   const resolved = resolveSources(config)
   if (!resolved.ok) return resolved
-  const { sources, source } = resolved
-  if (source === undefined) {
+  const { sources } = resolved
+  if (!sources.hasTokens && !sources.hasColors) {
     return {
       ok: false, paths: sources.paths, status: 'missing',
       message: `no palette file at tokensPath (${sources.tokensFile}) or colorsPath (${sources.colorsFile})`,
     }
   }
   try {
-    const stat = statSync(source)
-    if (stat.size > PALETTE_MAX_BYTES) {
-      throw new Error(`${source} is ${stat.size} bytes, over the ${PALETTE_MAX_BYTES} byte limit`)
-    }
-    const version = `${stat.mtimeMs}:${stat.size}`
-    if (paletteCache !== undefined && paletteCache.source === source && paletteCache.version === version) {
+    const mapped = loadPartSync(sources.colorsFile, sources.hasColors, parseMapped)
+    const tokens = loadPartSync(sources.tokensFile, sources.hasTokens, text => validateTokenDocument(JSON.parse(text)))
+    const version = `${mapped.key}|${tokens.key}`
+    if (paletteCache !== undefined && paletteCache.version === version) {
       return { ok: true, paths: sources.paths, palette: paletteCache }
     }
-    const modes = parsePalette(source, sources, readFileSync(source, 'utf8'))
-    paletteCache = { source, version, tokens: modes }
+    const modes = composePalette(sources, mapped.modes, tokens.modes)
+    auditCoverage(modes, tokens.modes, mapped.modes)
+    paletteCache = { source: sources.paths.tokens, version, tokens: modes }
     return { ok: true, paths: sources.paths, palette: paletteCache }
   } catch (error) {
-    return { ok: false, paths: sources.paths, status: 'error', message: `cannot read ${source}: ${(error as Error).message}` }
+    return {
+      ok: false, paths: sources.paths, status: 'error',
+      message: `cannot read palette: ${(error as Error).message}`,
+    }
   }
 }
 
 /**
+ * Load one palette part without blocking the Host event loop.
+ * @param path - absolute file path.
+ * @param exists - whether the file is present.
+ * @param parse - turns the file text into token modes.
+ * @returns the parsed part.
+ */
+async function loadPart(path: string, exists: boolean, parse: (text: string) => ThemeTokenModes): Promise<LoadedPart> {
+  if (!exists) return { key: '-', has: false }
+  const stat = await statFile(path)
+  if (stat.size > PALETTE_MAX_BYTES) {
+    throw new Error(`${path} is ${stat.size} bytes, over the ${PALETTE_MAX_BYTES} byte limit`)
+  }
+  return { key: `${path}@${stat.mtimeMs}:${stat.size}`, has: true, modes: parse(await readFileText(path)) }
+}
+
+/**
  * Read the palette for the poll endpoint without blocking the Host event loop.
- * Steady-state polls only stat the file; the cached table is reused.
+ * Steady-state polls only stat the files; the cached tables are reused.
  * @param config - resolved plugin configuration.
  * @returns the palette, or the reason it is unavailable.
  */
 async function readPalette(config: Config): Promise<PaletteRead> {
   const resolved = resolveSources(config)
   if (!resolved.ok) return resolved
-  const { sources, source } = resolved
-  if (source === undefined) {
+  const { sources } = resolved
+  if (!sources.hasTokens && !sources.hasColors) {
     return {
       ok: false, paths: sources.paths, status: 'missing',
       message: `no palette file at tokensPath (${sources.tokensFile}) or colorsPath (${sources.colorsFile})`,
     }
   }
   try {
-    const stat = await statFile(source)
-    if (stat.size > PALETTE_MAX_BYTES) {
-      throw new Error(`${source} is ${stat.size} bytes, over the ${PALETTE_MAX_BYTES} byte limit`)
-    }
-    const version = `${stat.mtimeMs}:${stat.size}`
-    if (paletteCache !== undefined && paletteCache.source === source && paletteCache.version === version) {
+    const mapped = await loadPart(sources.colorsFile, sources.hasColors, parseMapped)
+    const tokens = await loadPart(sources.tokensFile, sources.hasTokens, text => validateTokenDocument(JSON.parse(text)))
+    const version = `${mapped.key}|${tokens.key}`
+    if (paletteCache !== undefined && paletteCache.version === version) {
       return { ok: true, paths: sources.paths, palette: paletteCache }
     }
-    const modes = parsePalette(source, sources, await readFileText(source))
-    paletteCache = { source, version, tokens: modes }
+    const modes = composePalette(sources, mapped.modes, tokens.modes)
+    auditCoverage(modes, tokens.modes, mapped.modes)
+    paletteCache = { source: sources.paths.tokens, version, tokens: modes }
     return { ok: true, paths: sources.paths, palette: paletteCache }
   } catch (error) {
-    return { ok: false, paths: sources.paths, status: 'error', message: `cannot read ${source}: ${(error as Error).message}` }
+    return {
+      ok: false, paths: sources.paths, status: 'error',
+      message: `cannot read palette: ${(error as Error).message}`,
+    }
   }
 }
 

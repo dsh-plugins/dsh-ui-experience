@@ -18,7 +18,7 @@ export const BOOT_ATTRIBUTE = 'data-dsh-uix-matugen'
 /** Default matugen colors file, written by the user's quickshell setup. */
 export const DEFAULT_COLORS_PATH = '~/.local/state/quickshell/user/generated/colors.json'
 
-/** Default pre-mapped DSH token file; wins over the colors file when it exists. */
+/** Default pre-mapped DSH token file; its tokens layer over the colors file mapping. */
 export const DEFAULT_TOKENS_PATH = '~/.local/state/quickshell/user/generated/dsh-tokens.json'
 
 /** DSW token overrides for one palette mode. */
