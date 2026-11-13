@@ -224,6 +224,20 @@ const JUMP_ANIMATE_MIN = 24
 /** Wheel travel below this lands immediately, so the stream can end. */
 const WHEEL_SETTLE_PX = 0.5
 
+/**
+ * Pixels one `deltaMode: DOM_DELTA_LINE` unit moves, from Chromium's
+ * `cc::kPixelsPerLineStep`. A coarse wheel reports lines, so without this a notch
+ * would read as 3px and the layer would decline it.
+ */
+const PIXELS_PER_LINE = 40
+
+/** Fraction of the viewport one `DOM_DELTA_PAGE` unit moves, from Chromium's
+ *  `kMinFractionToStepWhenPaging`. */
+const PAGE_FRACTION = 0.875
+
+/** Overlap Chromium leaves between pages, from `kMaxOverlapBetweenPages`. */
+const PAGE_OVERLAP = 40
+
 /** How long a wheel run may coast after the last notch before it is cut short. */
 const WHEEL_MAX_MS = 900
 
@@ -587,24 +601,29 @@ export function createScrollMotion(): {
   function onWheel(event: WheelLike): boolean {
     const active = settings
     if (active === undefined) return false
-    // Zoom gestures arrive as ctrl+wheel and must keep their native meaning, and
-    // a coarse (line/page) delta has no pixel distance to ease.
-    if (event.ctrlKey || event.metaKey || event.deltaMode !== 0) return false
+    // Zoom gestures arrive as ctrl+wheel and must keep their native meaning.
+    if (event.ctrlKey || event.metaKey) return false
     if (wantsInstant()) return false
     const target = event.target
     if (target === null) return false
     // Text fields scroll themselves while the reader edits; easing that fights the
     // caret. Anything else the app explicitly claimed is already gone by here.
     if (target instanceof Element && target.closest(EDITABLE) !== null) return false
-    const element = scrollportOf(target as unknown as ElementLike)
+    if (event.deltaX === 0 && event.deltaY === 0) return false
+    // Look for a container that can move on the axis this gesture asks about, so a
+    // horizontally scrolling child cannot make the layer decline a vertical notch.
+    const element = scrollportOf(target as unknown as ElementLike, {
+      top: event.deltaY !== 0,
+      left: event.deltaX !== 0,
+    })
     if (element === null) return false
     const max = maxima(element)
-    if (max.top <= 0 && max.left <= 0) return false
+    const delta = pixelDelta(event, element)
     const base = wheel?.element === element ? wheel : undefined
     const fromTop = element.scrollTop
     const fromLeft = element.scrollLeft
-    const top = Math.min(max.top, Math.max(0, (base?.top ?? fromTop) + event.deltaY))
-    const left = Math.min(max.left, Math.max(0, (base?.left ?? fromLeft) + event.deltaX))
+    const top = Math.min(max.top, Math.max(0, (base?.top ?? fromTop) + delta.y))
+    const left = Math.min(max.left, Math.max(0, (base?.left ?? fromLeft) + delta.x))
     if (Math.abs(top - fromTop) < WHEEL_SETTLE_PX && Math.abs(left - fromLeft) < WHEEL_SETTLE_PX) return false
     event.preventDefault()
     // A wheel notch supersedes whatever was animating: the reader is in charge.
@@ -641,14 +660,43 @@ export function createScrollMotion(): {
    * @param node - the event target.
    * @returns the scroll container, or null.
    */
-  function scrollportOf(node: ElementLike | null): ElementLike | null {
+  function scrollportOf(
+    node: ElementLike | null, axis: { top: boolean; left: boolean },
+  ): ElementLike | null {
     let current = node
     while (current !== null) {
       const max = maxima(current)
-      if (max.top > 0 || max.left > 0) return current
+      // Only a container that can move on the axis the gesture asks for counts.
+      // A horizontally scrolling child — a code block, a wide table — must not
+      // swallow a vertical notch: the browser would chain it to the parent, and
+      // this layer declining would leave that parent on the native curve.
+      if ((axis.top && max.top > 0) || (axis.left && max.left > 0)) return current
       current = current.parentElement
     }
     return null
+  }
+
+  /**
+   * One page step, matching Chromium's `ScrollUtils::CalculatePageStep`.
+   * @param length - the viewport extent on the axis.
+   * @returns the pixels one page unit moves.
+   */
+  function pageStep(length: number): number {
+    return Math.max(1, Math.max(length * PAGE_FRACTION, length - PAGE_OVERLAP))
+  }
+
+  /**
+   * A wheel delta in pixels. A precise (trackpad, Wayland, macOS) event already
+   * is; a coarse wheel reports lines, and a page-scroll reports pages.
+   * @param event - the wheel event.
+   * @param element - the container the gesture will move, for its viewport size.
+   * @returns the delta in pixels.
+   */
+  function pixelDelta(event: WheelLike, element: ElementLike): { x: number; y: number } {
+    if (event.deltaMode === 0) return { x: event.deltaX, y: event.deltaY }
+    const unitY = event.deltaMode === 1 ? PIXELS_PER_LINE : pageStep(element.clientHeight)
+    const unitX = event.deltaMode === 1 ? PIXELS_PER_LINE : pageStep(element.clientWidth)
+    return { x: event.deltaX * unitX, y: event.deltaY * unitY }
   }
 
   /**
