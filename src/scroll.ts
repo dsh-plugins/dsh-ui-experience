@@ -357,18 +357,27 @@ export function createScrollMotion(): {
    */
   const END_GRACE_MS = 400
 
+  /** Slack for deciding a container was sitting at its floor before a write. */
+  const FOLLOW_PIN_TOLERANCE = 4
+
   /**
-   * How far above the floor a container must already sit for a write that lands
-   * exactly on the floor to count as "follow the streaming tail" rather than a
-   * deliberate jump from somewhere else.
+   * Growth below this is one or two lines arriving mid-stream, which is written
+   * straight through.
+   *
+   * The transcript already animates that arrival — the mask reveal makes the text
+   * appear progressively — so gliding the scrollport for the same few pixels adds a
+   * second motion on top of the first. During continuous output the glides would
+   * also chain end to end, leaving the viewport in permanent motion. Only a
+   * discrete block that lands in one go, a tool result or a whole paragraph, is
+   * worth easing into view.
    */
-  const FOLLOW_WINDOW_LINES = 3
+  const FOLLOW_GLIDE_MIN_PX = 48
 
   /** Longest a single follow glide may take. */
   const FOLLOW_MAX_MS = 260
 
-  /** Follow distance below which the write is applied directly. */
-  const FOLLOW_MIN_PX = 0.5
+  /** Floor each container was last seen at, so "was pinned" can be answered. */
+  const lastFloor = new WeakMap<ElementLike, number>()
 
   /**
    * Containers currently inside that grace window. A `WeakMap` cannot be walked,
@@ -592,9 +601,17 @@ export function createScrollMotion(): {
     if (max.top <= 0) return false
     // Must land on the floor, which is what the follow loop writes.
     if (Math.abs(value - max.top) > 1) return false
-    const line = 22
-    if (max.top - element.scrollTop > line * FOLLOW_WINDOW_LINES) return false
-    return Math.abs(value - element.scrollTop) > FOLLOW_MIN_PX
+    // Was the container sitting at its floor before this content arrived? Recorded
+    // floor to floor, because by the time the write happens the floor has already
+    // moved by however much was inserted.
+    const known = lastFloor.get(element)
+    const wasPinned = known === undefined
+      ? element.scrollTop >= max.top - FOLLOW_PIN_TOLERANCE
+      : element.scrollTop >= known - FOLLOW_PIN_TOLERANCE
+    lastFloor.set(element, max.top)
+    if (!wasPinned) return false
+    // A discrete block is worth easing; continuous one-line growth is not.
+    return Math.abs(value - element.scrollTop) >= FOLLOW_GLIDE_MIN_PX
   }
 
   /**
@@ -1030,6 +1047,7 @@ export function createScrollMotion(): {
    * @returns whether this input belongs to the run and was stopped.
    */
   function cancelIfOwned(target: EventTarget | null): boolean {
+    const active = run
     for (const [element, glide] of followGlides) {
       if (target !== null && element.contains(target)) {
         window.cancelAnimationFrame(glide.frame)
@@ -1037,7 +1055,6 @@ export function createScrollMotion(): {
         release(element, true)
       }
     }
-    const active = run
     if (active === undefined || target === null) return false
     if (!active.legs.some(leg => leg.element.contains(target))) return false
     cancel()

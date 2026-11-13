@@ -33,6 +33,7 @@
  */
 
 import { type MotionSettings } from './shared.ts'
+import { effectCurvePoints, quantizeMs } from './motion-plan.ts'
 
 /** The attribute this layer writes to mark what it is animating. */
 const STREAM_ATTRIBUTE = 'data-dsh-uix-stream'
@@ -70,8 +71,8 @@ const MAX_REVEAL_MS = 480
  */
 const REVEAL_PX_PER_MS = 0.55
 
-/** How long a live label's roll takes. */
-const ROLL_MS = 260
+/** How long a live label's roll takes before the configured multiplier. */
+const ROLL_BASE_MS = 260
 
 /** Steepest tilt allowed, so a very narrow box does not become a vertical wipe. */
 const MAX_TILT_DEG = 30
@@ -137,12 +138,14 @@ const STREAM_CSS = `
   opacity: 0;
 }
 
+/* Duration and curve come from the configured family, set as custom properties on
+   the root when the layer applies; the literals here are only a fallback. */
 [${STREAM_ATTRIBUTE}="roll"][data-dsh-uix-rolling] > * {
-  animation: dsh-uix-roll-in ${ROLL_MS}ms var(--dsh-uix-ease, cubic-bezier(0.34, 0.8, 0.34, 1)) both;
+  animation: dsh-uix-roll-in var(--dsh-uix-roll, 260ms) var(--dsh-uix-ease, ease) both;
 }
 
 [${STREAM_ATTRIBUTE}="roll"][data-dsh-uix-rolling]::after {
-  animation: dsh-uix-roll-out ${ROLL_MS}ms var(--dsh-uix-ease, cubic-bezier(0.34, 0.8, 0.34, 1)) both;
+  animation: dsh-uix-roll-out var(--dsh-uix-roll, 260ms) var(--dsh-uix-ease, ease) both;
 }
 
 @keyframes dsh-uix-roll-in {
@@ -166,13 +169,6 @@ const STREAM_CSS = `
   }
 }
 `
-
-declare const document: {
-  querySelectorAll(selectors: string): { readonly length: number; [index: number]: ElementLike | undefined }
-  createElement(tag: 'style'): { textContent: string; remove(): void }
-  readonly head: { appendChild(node: unknown): unknown }
-  readonly body: unknown
-}
 
 declare const window: {
   requestAnimationFrame(callback: (time: number) => void): number
@@ -210,6 +206,14 @@ interface ElementLike {
   closest(selectors: string): unknown
 }
 
+declare const document: {
+  querySelectorAll(selectors: string): { readonly length: number; [index: number]: ElementLike | undefined }
+  createElement(tag: 'style'): { textContent: string; remove(): void }
+  readonly head: { appendChild(node: unknown): unknown }
+  readonly body: unknown
+  readonly documentElement: { readonly style: { setProperty(name: string, value: string): void; removeProperty(name: string): string } }
+}
+
 /**
  * Build the streaming-output layer. It starts inert; `apply` installs it.
  * @returns the handle the client keeps for the bundle's lifetime.
@@ -225,6 +229,7 @@ export function createStreamMotion(): {
   let pending = false
   let installed = false
   let ease = ''
+  let rollMs = ROLL_BASE_MS
 
   /** Whether the current policy asks for no motion at all. */
   function still(): boolean {
@@ -289,9 +294,11 @@ export function createStreamMotion(): {
    * @param scale - the configured duration multiplier.
    * @returns the duration in milliseconds.
    */
-  function revealDuration(gap: number, scale: number): number {
-    const raw = gap / REVEAL_PX_PER_MS
-    return Math.min(MAX_REVEAL_MS, Math.max(MIN_REVEAL_MS, raw * scale))
+  function revealDuration(gap: number): number {
+    const active = settings as MotionSettings
+    const raw = gap / REVEAL_PX_PER_MS * active.durationScale
+    const bounded = Math.min(MAX_REVEAL_MS, Math.max(MIN_REVEAL_MS, raw))
+    return active.quantize ? quantizeMs(bounded) : bounded
   }
 
   /**
@@ -300,8 +307,7 @@ export function createStreamMotion(): {
    * @param state - its reveal state.
    */
   function advance(element: ElementLike, state: Reveal): void {
-    const active = settings
-    if (active === undefined) return
+    if (settings === undefined) return
     const computed = window.getComputedStyle(element)
     const lineHeight = Number.parseFloat(computed.lineHeight)
     const height = Number.isFinite(lineHeight) && lineHeight > 0 ? lineHeight : 22
@@ -315,7 +321,7 @@ export function createStreamMotion(): {
     }
     // The duration differs per chunk, so it cannot live in the sheet: a transition
     // declared there would apply the same duration to every arrival.
-    element.style.transition = `--dsh-uix-reveal ${revealDuration(gap, active.durationScale)}ms ${ease}`
+    element.style.transition = `--dsh-uix-reveal ${revealDuration(gap)}ms ${ease}`
     element.style.setProperty('--dsh-uix-reveal', `${state.target}px`)
     state.shown = state.target
   }
@@ -339,7 +345,7 @@ export function createStreamMotion(): {
     window.setTimeout(() => {
       element.removeAttribute('data-dsh-uix-rolling')
       element.removeAttribute('data-dsh-uix-prev')
-    }, ROLL_MS)
+    }, rollMs)
   }
 
   /**
@@ -489,6 +495,8 @@ export function createStreamMotion(): {
     sheet?.remove()
     sheet = undefined
     installed = false
+    document.documentElement.style.removeProperty('--dsh-uix-ease')
+    document.documentElement.style.removeProperty('--dsh-uix-roll')
     const marked = document.querySelectorAll(`[${STREAM_ATTRIBUTE}]`)
     for (let index = 0; index < marked.length; index += 1) {
       const element = marked[index]
@@ -503,7 +511,14 @@ export function createStreamMotion(): {
       settings = next
       if (next.mode === 'off' || !next.stream) return
       if (next.reduced === 'system' && window.matchMedia('(prefers-reduced-motion: reduce)').matches) return
-      ease = 'cubic-bezier(0.34, 0.8, 0.34, 1)'
+      // Both the reveal transition and the label roll read the configured family,
+      // so switching M3 / M3E or the duration multiplier reaches the stream layer
+      // the same way it reaches every rewritten rule.
+      ease = `cubic-bezier(${effectCurvePoints(next.mode).join(', ')})`
+      const scaled = ROLL_BASE_MS * next.durationScale
+      rollMs = next.quantize ? quantizeMs(scaled) : scaled
+      document.documentElement.style.setProperty('--dsh-uix-ease', ease)
+      document.documentElement.style.setProperty('--dsh-uix-roll', `${rollMs}ms`)
       install()
     },
     restore: uninstall,
