@@ -329,6 +329,8 @@ function registerClient(): void {
         let lastPaletteProblem = ''
         /** Set once the host reported no motion field, so the cause is logged once. */
         let motionUnsupported = false
+        /** Set once the host reported a motion payload without the stream flag. */
+        let streamUnsupported = false
         /** Border width currently painted. */
         let paintedWidth = ''
         let disposeOverride: (() => void) | undefined
@@ -494,7 +496,20 @@ function registerClient(): void {
           // changes on a process restart, so the two can be one build apart. A
           // host without the motion field leaves the layer off rather than
           // failing here; the reason is logged once instead of every poll.
-          const motionAnswer = answer.motion ?? MOTION_OFF
+          // A host build from before a field was added reports one fewer key. Fill
+          // it in rather than sending it back: the layer it controls lives in this
+          // half, so it can still work, but the switch that persists it cannot.
+          const reported = answer.motion
+          if (reported !== undefined && reported.stream === undefined) {
+            if (!streamUnsupported) {
+              streamUnsupported = true
+              console.error('ui-experience: this host build predates the stream setting; '
+                + 'progressive streamed text stays on and its switch stays hidden until DSH restarts')
+            }
+          }
+          const motionAnswer: MotionSettings = reported === undefined
+            ? { ...MOTION_OFF }
+            : { ...MOTION_OFF, ...reported, stream: reported.stream ?? true }
           if (answer.motion === undefined && !motionUnsupported) {
             motionUnsupported = true
             console.error('ui-experience: this host build predates the motion settings; '
@@ -587,6 +602,13 @@ function registerClient(): void {
          */
         const saveMotion = async (change: SetMotionArgs): Promise<void> => {
           if (disposed || writing) return
+          if (streamUnsupported && change.stream !== undefined) {
+            // The stored configuration has no such key, so the write would be
+            // rejected outright; report that instead of failing the whole row.
+            console.error('ui-experience: the stream setting cannot be saved on this host build; '
+              + 'restart DSH to pick it up')
+            return
+          }
           writing = true
           publish({ saving: true, problem: '', notice: '' })
           try {
@@ -943,7 +965,7 @@ function registerClient(): void {
               checkbox(current.quantize,
                 next => { void saveMotion({ quantize: next }) },
                 tr('motion.quantize'), tr('motion.quantize-hint'), locked),
-              checkbox(current.stream,
+              streamUnsupported ? null : checkbox(current.stream,
                 next => { void saveMotion({ stream: next }) },
                 tr('motion.stream'), tr('motion.stream-hint'), locked),
               checkbox(current.scroll,
