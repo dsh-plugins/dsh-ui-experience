@@ -52,6 +52,30 @@ const ENTER_ATTRIBUTE = 'data-dsh-uix-enter'
 const ROLL_ATTRIBUTE = 'data-dsh-uix-rolling'
 
 /**
+ * The application's own unique names for a transcript row, in the order a slot key
+ * prefers them.
+ *
+ * These are values, not nodes, so they survive a rebuild of whatever carries them. One
+ * of them also marks where a slot key may stop climbing: the row is the thing that stays
+ * put, and its position among its siblings is none of the label's business.
+ */
+const ROW_IDENTITY_ATTRIBUTES = ['data-chat-anchor-key', 'data-chat-flow-key', 'data-chat-group-key']
+
+/**
+ * The application's names for what a row is currently showing.
+ *
+ * Unlike the row identities these are not unique — every process row says
+ * `data-chat-flow-kind=turn-process` — so they qualify a slot without terminating it.
+ */
+const CONTEXT_ATTRIBUTES = ['data-chat-flow-kind', 'data-process-activity']
+
+/** How many label slots are remembered before the oldest are dropped. */
+const SLOT_LIMIT = 512
+
+/** How long a label slot may go unoccupied before it is forgotten. */
+const SLOT_IDLE_MS = 30000
+
+/**
  * Rows the transcript appends while it is following its tail.
  *
  * A row enters by fading and rising a couple of pixels. `transform` and `opacity`
@@ -397,18 +421,20 @@ export function createStreamMotion(): {
   const rolls = new WeakMap<ElementLike, number>()
 
   /**
-   * What each label slot showed last time, keyed by parent element and child index.
+   * What each label slot last showed, keyed by where the slot sits in the transcript.
    *
-   * A label is not guaranteed to keep its DOM node: the process row is rebuilt whenever
-   * its title changes, so the element carrying the text is new on every update. Keying
-   * the remembered text on the element then made every update look like a brand-new
-   * label, which replayed the full arrival each time — the reader sees the whole line
-   * rise and fade in again for one more word.
+   * A label keeps neither its element nor its parents across an update: the process row
+   * is rebuilt whenever its group data changes, so the whole button subtree — including
+   * the element that carries the text — is new even when the line it shows is the same
+   * one. Remembering the text on the element, or on its parent, therefore made every
+   * rebuild look like a brand-new label and replayed the arrival on unchanged text.
    *
-   * Keying it on the slot instead makes the update readable as what it is: the same line
-   * with more words, or a different line.
+   * The key is a string built by {@link slotKey} instead: the child index at each level
+   * below the enclosing row, anchored on the row's own name. Both are values rather than
+   * nodes, so neither a rebuild of the row's contents nor a shift of the row itself
+   * changes the key.
    */
-  const slots = new WeakMap<ElementLike, Map<number, { text: string; width: number }>>()
+  const slots = new Map<string, { text: string; width: number; at: number }>()
 
   /**
    * Take the next generation for an element.
@@ -597,50 +623,100 @@ export function createStreamMotion(): {
   }
 
   /**
-   * The slot an element occupies: its parent and its index among that parent's
-   * children.
+   * The application's unique name for a row, if it has one.
    * @param element - the element.
-   * @returns its slot, or null when it has no parent.
+   * @returns one `name=value` token, or the empty string.
    */
-  function slotOf(element: ElementLike): { parent: ElementLike; index: number } | null {
-    const parent = element.parentElement
-    if (parent === null) return null
-    const children = parent.children
-    for (let index = 0; index < children.length; index += 1) {
-      if (children[index] === element) return { parent, index }
+  function rowIdentityOf(element: ElementLike): string {
+    for (const name of ROW_IDENTITY_ATTRIBUTES) {
+      const value = element.getAttribute(name)
+      if (value !== null && value !== '') return `${name}=${value}`
     }
-    return null
+    return ''
+  }
+
+  /**
+   * The application's name for what a row is showing, if it has one.
+   * @param element - the element.
+   * @returns one `name=value` token, or the empty string.
+   */
+  function contextOf(element: ElementLike): string {
+    for (const name of CONTEXT_ATTRIBUTES) {
+      const value = element.getAttribute(name)
+      if (value !== null && value !== '') return `:${value}`
+    }
+    return ''
+  }
+
+  /**
+   * Where a label sits in the transcript, as a string that outlives its nodes.
+   *
+   * The walk climbs from the label and stops at the first ancestor the application has
+   * named uniquely. Everything below that ancestor is described by the child index at
+   * each level, because that is what distinguishes one label from another inside a row;
+   * the named ancestor itself contributes only its name, because rows move down the
+   * transcript as history loads and their position is not part of their identity.
+   *
+   * @param element - the label.
+   * @returns its slot key, or null when it is detached.
+   */
+  function slotKey(element: ElementLike): string | null {
+    const parts: string[] = []
+    let node = element
+    while (true) {
+      const parent = node.parentElement
+      if (parent === null) break
+      const identity = rowIdentityOf(node)
+      if (identity !== '') return `${identity}#${parts.reverse().join('/')}`
+      const children = parent.children
+      let index = -1
+      for (let at = 0; at < children.length; at += 1) {
+        if (children[at] === node) {
+          index = at
+          break
+        }
+      }
+      if (index < 0) return null
+      parts.push(`${index}${contextOf(node)}`)
+      node = parent
+    }
+    return parts.length === 0 ? null : parts.reverse().join('/')
   }
 
   /**
    * What a label slot showed last time.
-   * @param slot - the slot, or null.
+   * @param key - the slot key, or null.
    * @returns the remembered text and width, or undefined for a slot never seen.
    */
-  function readSlot(slot: { parent: ElementLike; index: number } | null): { text: string; width: number } | undefined {
-    if (slot === null) return undefined
-    return slots.get(slot.parent)?.get(slot.index)
+  function readSlot(key: string | null): { text: string; width: number } | undefined {
+    if (key === null) return undefined
+    const entry = slots.get(key)
+    if (entry === undefined) return undefined
+    entry.at = performance.now()
+    return entry
   }
 
   /**
    * Remember what a label slot now shows.
-   * @param slot - the slot, or null.
+   * @param key - the slot key, or null.
    * @param text - the label's text.
    * @param width - its rendered width in pixels.
    */
-  function writeSlot(slot: { parent: ElementLike; index: number } | null, text: string, width: number): void {
-    if (slot === null) return
-    let entries = slots.get(slot.parent)
-    if (entries === undefined) {
-      entries = new Map()
-      slots.set(slot.parent, entries)
+  function writeSlot(key: string | null, text: string, width: number): void {
+    if (key === null) return
+    slots.set(key, { text, width, at: performance.now() })
+    if (slots.size <= SLOT_LIMIT) return
+    // Keys are strings, so they are not collected with their nodes. Drop the ones no
+    // label has occupied for a while, and fall back to insertion order if that is not
+    // enough — a key that is dropped only costs one arrival replayed on unchanged text,
+    // which is what happened on every update before the slot was remembered at all.
+    const now = performance.now()
+    for (const [candidate, entry] of slots) {
+      if (now - entry.at > SLOT_IDLE_MS) slots.delete(candidate)
     }
-    entries.set(slot.index, { text, width })
-    // A slot only stops existing when the parent loses that many children, so dropping
-    // the entries past the end keeps this bounded without tracking removals.
-    const count = slot.parent.children.length
-    for (const index of entries.keys()) {
-      if (index >= count) entries.delete(index)
+    for (const candidate of slots.keys()) {
+      if (slots.size <= SLOT_LIMIT) break
+      slots.delete(candidate)
     }
   }
 
@@ -1023,7 +1099,7 @@ export function createStreamMotion(): {
       // Read the previous state from the slot, not from the element. The process row is
       // rebuilt when its title changes, so the element is often new while the line it
       // shows is the same one, a word longer.
-      const slot = slotOf(element)
+      const slot = slotKey(element)
       const prior = readSlot(slot)
       const previous = prior?.text ?? element.getAttribute(LAST_ATTRIBUTE) ?? ''
       const previousWidth = prior?.width ?? Number.parseFloat(element.getAttribute(WIDTH_ATTRIBUTE) ?? '0')
