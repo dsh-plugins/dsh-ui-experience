@@ -160,6 +160,8 @@ interface ViewState {
   borderWidth: string
   paths: PalettePaths
   motion: MotionSettings
+  /** The host build predates a field this half can still animate but cannot save. */
+  streamUnsupported: boolean
   problem: string
   notice: string
   saving: boolean
@@ -210,6 +212,11 @@ function uiExperienceRemoteContribution(zod: ZodLike): { package: string; descri
         reduced: zod.string().optional(),
         scroll: zod.boolean().optional(),
         stream: zod.boolean().optional(),
+        followScroll: zod.boolean().optional(),
+        streamRevealMinMs: zod.number().optional(),
+        streamRevealMaxMs: zod.number().optional(),
+        streamEnterMs: zod.number().optional(),
+        streamRollMs: zod.number().optional(),
       }), 'SetMotionArgs'),
     ],
   }
@@ -242,6 +249,14 @@ const DICTS: Record<string, Record<string, string>> = {
     'motion.quantize-hint': '时长吸附到 50 至 1000ms 的 Material 档位。',
     'motion.stream': '流式文本渐进显现',
     'motion.stream-hint': '正文与思考摘要逐段显现；只移动遮罩，不截断文字。',
+    'motion.stream-timing': '流式动画时长',
+    'motion.follow-scroll': '跟随到底时平滑滑行',
+    'motion.follow-scroll-hint': '关闭后底部跟随瞬时贴齐，只有文字在动；开启时视口滑过去，观感更连续但始终落后约一行。',
+    'motion.stream-reveal-min': '单行显现下限（ms）',
+    'motion.stream-reveal-max': '整块显现上限（ms）',
+    'motion.stream-enter': '新行进场（ms）',
+    'motion.stream-roll': '摘要换行滚动（ms）',
+    'motion.stream-timing-hint': '单行下限就是缓存的可见窗口：调大它，边界后方压着的未读文字更多、动画更慢。上限用于整块内容一次落下的情形。',
     'motion.scroll': '滚动使用同一曲线',
     'motion.scroll-hint': '平滑滚动、滚轮与定位跳转改用本页曲线。',
     'motion.reduced': '始终减弱动效',
@@ -276,6 +291,14 @@ const DICTS: Record<string, Record<string, string>> = {
     'motion.quantize-hint': 'Snap durations onto the 50-1000 ms Material ladder.',
     'motion.stream': 'Progressive streamed text',
     'motion.stream-hint': 'Reveal transcript and reasoning progressively; a mask moves, no text is cut.',
+    'motion.stream-timing': 'Stream timing',
+    'motion.follow-scroll': 'Glide when following the tail',
+    'motion.follow-scroll-hint': 'Off keeps the tail pinned exactly and only the text moves. On eases the viewport along — smoother, but about a line behind.',
+    'motion.stream-reveal-min': 'Reveal floor, one line (ms)',
+    'motion.stream-reveal-max': 'Reveal ceiling, whole block (ms)',
+    'motion.stream-enter': 'New row settle (ms)',
+    'motion.stream-roll': 'Summary roll (ms)',
+    'motion.stream-timing-hint': 'The floor is the visible buffer: raise it and more unread text stays behind the boundary, so the reveal reads slower. The ceiling covers a block that lands all at once.',
     'motion.scroll': 'Scroll on the same curve',
     'motion.scroll-hint': 'Drive smooth scrolling, the wheel, and locating jumps on this page\'s curve.',
     'motion.reduced': 'Always reduce motion',
@@ -329,8 +352,7 @@ function registerClient(): void {
         let lastPaletteProblem = ''
         /** Set once the host reported no motion field, so the cause is logged once. */
         let motionUnsupported = false
-        /** Set once the host reported a motion payload without the stream flag. */
-        let streamUnsupported = false
+
         /** Border width currently painted. */
         let paintedWidth = ''
         let disposeOverride: (() => void) | undefined
@@ -341,6 +363,7 @@ function registerClient(): void {
           borderWidth: '0.5px',
           paths: { colors: DEFAULT_COLORS_PATH, tokens: DEFAULT_TOKENS_PATH },
           motion: { ...MOTION_OFF },
+          streamUnsupported: false,
           problem: '',
           notice: '',
           saving: false,
@@ -405,6 +428,11 @@ function registerClient(): void {
           || left.reduced !== right.reduced
           || left.scroll !== right.scroll
           || left.stream !== right.stream
+          || left.followScroll !== right.followScroll
+          || left.streamRevealMinMs !== right.streamRevealMinMs
+          || left.streamRevealMaxMs !== right.streamRevealMaxMs
+          || left.streamEnterMs !== right.streamEnterMs
+          || left.streamRollMs !== right.streamRollMs
 
         /** Drop the palette override layer, if one is mounted. */
         const clearOverride = (): void => {
@@ -500,12 +528,12 @@ function registerClient(): void {
           // it in rather than sending it back: the layer it controls lives in this
           // half, so it can still work, but the switch that persists it cannot.
           const reported = answer.motion
-          if (reported !== undefined && reported.stream === undefined) {
-            if (!streamUnsupported) {
-              streamUnsupported = true
-              console.error('ui-experience: this host build predates the stream setting; '
-                + 'progressive streamed text stays on and its switch stays hidden until DSH restarts')
-            }
+          if (reported !== undefined && reported.stream === undefined && !view.streamUnsupported) {
+            // In view state, not a closure variable: the row has to re-render for the
+            // switch to disappear, and only a publish does that.
+            console.error('ui-experience: this host build predates the stream setting; '
+              + 'progressive streamed text stays on and its switch stays hidden until DSH restarts')
+            publish({ streamUnsupported: true })
           }
           const motionAnswer: MotionSettings = reported === undefined
             ? { ...MOTION_OFF }
@@ -602,7 +630,7 @@ function registerClient(): void {
          */
         const saveMotion = async (change: SetMotionArgs): Promise<void> => {
           if (disposed || writing) return
-          if (streamUnsupported && change.stream !== undefined) {
+          if (view.streamUnsupported && change.stream !== undefined) {
             // The stored configuration has no such key, so the write would be
             // rejected outright; report that instead of failing the whole row.
             console.error('ui-experience: the stream setting cannot be saved on this host build; '
@@ -728,6 +756,38 @@ function registerClient(): void {
             }, h('path', { d: 'M4 6L7.29289 9.29289C7.68342 9.68342 8.31658 9.68342 8.70711 9.29289L12 6' })),
           ),
           h('span', null, label))
+
+        /**
+         * Numeric option row: title, one-line hint, and a number input on the same
+         * `Input` primitive footing as the path fields above.
+         * @param label - the row title.
+         * @param hint - one-line explanation.
+         * @param value - current value.
+         * @param commit - receives a parsed number when the field loses focus.
+         * @param disabled - locks the field during a write.
+         * @returns the row.
+         */
+        const numberRow = (
+          label: string, hint: string, value: number,
+          commit: (next: number) => void, disabled: boolean,
+        ): unknown =>
+          h('label', { className: 'dsh-uix-field' },
+            h('span', { className: 'dsh-uix-label' }, label),
+            h('span', { className: 'dsh-uix-input-wrap' },
+              h('input', {
+                className: 'dsh-uix-input',
+                type: 'number',
+                min: 0,
+                step: 10,
+                defaultValue: String(value),
+                disabled,
+                onChange: (event: { target: { value: string; valueAsNumber: number } }) => {
+                  const parsed = event.target.valueAsNumber
+                  if (Number.isFinite(parsed) && parsed >= 0) commit(Math.round(parsed))
+                },
+              }),
+            ),
+            h('p', { className: 'dsh-uix-hint' }, hint))
 
         /** One segment of a segmented control. */
         interface Segment {
@@ -971,15 +1031,31 @@ function registerClient(): void {
               option(current.quantize,
                 next => { void saveMotion({ quantize: next }) },
                 tr('motion.quantize'), tr('motion.quantize-hint'), locked),
-              streamUnsupported ? null : option(current.stream,
+              state.streamUnsupported ? null : option(current.stream,
                 next => { void saveMotion({ stream: next }) },
                 tr('motion.stream'), tr('motion.stream-hint'), locked),
+              option(current.followScroll,
+                next => { void saveMotion({ followScroll: next }) },
+                tr('motion.follow-scroll'), tr('motion.follow-scroll-hint'), locked),
               option(current.scroll,
                 next => { void saveMotion({ scroll: next }) },
                 tr('motion.scroll'), tr('motion.scroll-hint'), locked),
               option(current.reduced === 'always',
                 next => { void saveMotion({ reduced: next ? 'always' : 'system' }) },
                 tr('motion.reduced'), tr('motion.reduced-hint'), locked),
+            )
+            : null
+
+          const timing = current.stream && !state.streamUnsupported && open
+            ? h('div', { className: 'dsh-uix-form' },
+              numberRow(tr('motion.stream-reveal-min'), tr('motion.stream-timing-hint'),
+                current.streamRevealMinMs, next => { void saveMotion({ streamRevealMinMs: next }) }, locked),
+              numberRow(tr('motion.stream-reveal-max'), '', current.streamRevealMaxMs,
+                next => { void saveMotion({ streamRevealMaxMs: next }) }, locked),
+              numberRow(tr('motion.stream-enter'), '', current.streamEnterMs,
+                next => { void saveMotion({ streamEnterMs: next }) }, locked),
+              numberRow(tr('motion.stream-roll'), '', current.streamRollMs,
+                next => { void saveMotion({ streamRollMs: next }) }, locked),
             )
             : null
 
@@ -1007,6 +1083,7 @@ function registerClient(): void {
             current.mode === 'off' ? h('p', { className: 'dsh-uix-hint' }, tr('motion.inert')) : null,
             disclosure(open, () => { setOpen(!open) }, tr('motion.options')),
             policy,
+            timing,
           )
         }
 

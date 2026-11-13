@@ -64,6 +64,22 @@ export interface MotionSettings {
   scroll: boolean
   /** Whether streamed transcript and reasoning text reveals progressively. */
   stream: boolean
+  /**
+   * Whether the streaming tail glides to its new floor instead of jumping.
+   *
+   * On, the transcript scrolls smoothly under continuous output. Off, it stays
+   * pinned exactly and only the text animates — which some readers prefer, because
+   * a tail that is always catching up is itself a moving picture.
+   */
+  followScroll: boolean
+  /** Shortest reveal for one line, in milliseconds. This is the visible buffer. */
+  streamRevealMinMs: number
+  /** Longest reveal, reached by a whole block arriving at once, in milliseconds. */
+  streamRevealMaxMs: number
+  /** How long a new transcript row takes to settle in, in milliseconds. */
+  streamEnterMs: number
+  /** How long the reasoning summary's line roll takes, in milliseconds. */
+  streamRollMs: number
 }
 
 /** A motion layer that already did nothing; the client compares against it. */
@@ -75,6 +91,11 @@ export const MOTION_OFF: MotionSettings = {
   reduced: 'system',
   scroll: false,
   stream: true,
+  followScroll: true,
+  streamRevealMinMs: 250,
+  streamRevealMaxMs: 1200,
+  streamEnterMs: 220,
+  streamRollMs: 260,
 }
 
 /** Arguments of the poll endpoint: the caller's last seen palette version. */
@@ -143,6 +164,11 @@ export interface SetMotionArgs {
   reduced?: MotionReduced
   scroll?: boolean
   stream?: boolean
+  followScroll?: boolean
+  streamRevealMinMs?: number
+  streamRevealMaxMs?: number
+  streamEnterMs?: number
+  streamRollMs?: number
 }
 
 /** Result of the setMotion endpoint: the settings now in effect. */

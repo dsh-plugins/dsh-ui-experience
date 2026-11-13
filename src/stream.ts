@@ -44,6 +44,9 @@ const LAST_ATTRIBUTE = 'data-dsh-uix-last'
 /** Remembers how wide that text was, so an append knows where to start. */
 const WIDTH_ATTRIBUTE = 'data-dsh-uix-width'
 
+/** How long a label's appended text takes to arrive, before the configured scale. */
+const APPEND_BASE_MS = 260
+
 /** Marks a row this layer is unveiling after it was inserted. */
 const ENTER_ATTRIBUTE = 'data-dsh-uix-enter'
 
@@ -60,18 +63,31 @@ const ENTER_ATTRIBUTE = 'data-dsh-uix-enter'
  */
 const ROW = '[data-chat-flow-kind], [data-chat-anchor-key], [data-submission-echo], [data-pending-steering]'
 
-/** How long a new row takes to settle in. */
-const ENTER_BASE_MS = 220
+/** Fallbacks used only until `apply` supplies the configured values. */
+const ENTER_FALLBACK_MS = 220
 
 /**
- * Elements that carry live text.
+ * Elements that carry live text this layer animates.
  *
- * `AssistantMarkdown` puts `data-streaming` on its root while a message is being
- * produced; `ReasoningRow` puts it on the one-line summary; and every live label in
- * the work steps — a process group title, the running status — goes through
- * `TextShimmer`, which marks its root with `data-shimmer` while it is animating.
+ * Only `data-streaming` is used. The work-step labels — a process group title, the
+ * running-status line with its elapsed timer — go through `TextShimmer`, which
+ * already animates them with its own sweep and marks its root `data-shimmer`.
+ * Painting a second mask over those roots was wrong twice: it covered the
+ * decoration layer `TextShimmer` draws the sweep into, so the label flickered, and
+ * the elapsed-time label ticks once a second, which is not an arrival worth
+ * animating at all.
  */
-const LIVE = '[data-streaming], [data-shimmer]'
+const LIVE = '[data-streaming], [data-process-activity] [data-shimmer]'
+
+/**
+ * Reasons a live element is animated.
+ *
+ * - `reveal`: multi-line prose, uncovered by a descending mask line.
+ * - `roll`: a one-line summary whose content is replaced wholesale.
+ * - `append`: a one-line work-step label, which grows by appending. Only the added
+ *   characters are revealed, so the text a reader has already read stays put.
+ */
+type Mode = 'reveal' | 'roll' | 'append'
 
 /**
  * Reveal distance below which a new position is written without a transition.
@@ -97,19 +113,13 @@ const MIN_REVEAL_PX = 0.5
  * makes each arrival finish before the eye registers it, which reads as no animation
  * at all.
  */
-const REVEAL_MIN_MS = 250
-const REVEAL_MAX_MS = 1200
-const REVEAL_CURVE = 36.8
 const REVEAL_EXPONENT = 0.62
 
-/**
- * How long a label's appended text takes to fade in, before the configured
- * multiplier.
- */
-const APPEND_BASE_MS = 240
+/** One line of body text, the unit the configured floor is expressed in. */
+const ONE_LINE_PX = 24
 
-/** How long a live label's roll takes before the configured multiplier. */
-const ROLL_BASE_MS = 260
+/** Height of the mask's trailing fade, in line heights. */
+const FADE_BAND = 0.45
 
 /** Steepest tilt allowed, so a very narrow box does not become a vertical wipe. */
 const MAX_TILT_DEG = 30
@@ -143,6 +153,12 @@ const STREAM_CSS = `
   initial-value: 0px;
 }
 
+@property --dsh-uix-edge {
+  syntax: '<length>';
+  inherits: false;
+  initial-value: 0px;
+}
+
 @property --dsh-uix-tilt {
   syntax: '<angle>';
   inherits: false;
@@ -156,7 +172,7 @@ const STREAM_CSS = `
   --dsh-uix-reveal: 0px;
   mask-image: linear-gradient(
     var(--dsh-uix-tilt),
-    #000 calc(var(--dsh-uix-reveal) - 0.6lh),
+    #000 calc(var(--dsh-uix-reveal) - ${FADE_BAND}lh),
     transparent var(--dsh-uix-reveal)
   );
   mask-size: 100% 100%;
@@ -171,17 +187,6 @@ const STREAM_CSS = `
   overflow: hidden;
 }
 
-/* Appended text arrives from a horizontal edge that sits where the previous text
-   ended. Only the new characters cross it, so nothing the reader has already read
-   moves. */
-[${STREAM_ATTRIBUTE}="roll"][data-dsh-uix-appending] > * {
-  --dsh-uix-append-to: var(--dsh-uix-append-end, 100%);
-  animation: dsh-uix-append var(--dsh-uix-append-ms, 240ms) var(--dsh-uix-ease, ease) both;
-}
-
-@keyframes dsh-uix-append {
-  from { mask-image: linear-gradient(to right, #000 var(--dsh-uix-append), transparent calc(var(--dsh-uix-append) + 2ch)); }
-  to { mask-image: linear-gradient(to right, #000 var(--dsh-uix-append-to), transparent calc(var(--dsh-uix-append-to) + 2ch)); }
 }
 
 [${STREAM_ATTRIBUTE}="roll"]::after {
@@ -198,6 +203,32 @@ const STREAM_CSS = `
    the root when the layer applies; the literals here are only a fallback. */
 [${STREAM_ATTRIBUTE}="roll"][data-dsh-uix-rolling] > * {
   animation: dsh-uix-roll-in var(--dsh-uix-roll, 260ms) var(--dsh-uix-ease, ease) both;
+}
+
+/* Appended label text: a horizontal edge sits where the previous text ended and
+   sweeps to the new width, so only the added characters arrive. The mask goes on
+   the FIRST child alone: TextShimmer renders its readable copy first and its
+   decorative sweep second, and masking that second copy is what made these labels
+   flicker.
+
+   Keyframing the gradient was tried and does not work: Chrome snaps between the two
+   linear-gradients instead of interpolating them, which is why the label appeared to
+   jump with no animation at all. The edge is a registered custom property instead,
+   and a transition on it drives the mask — the same mechanism the body reveal uses. */
+/* A step label arrives as a whole line and slides up into place. Only later growth
+   is appended, so the first appearance and every extension read differently: the row
+   moving in, then its text extending without the row moving again. */
+[${STREAM_ATTRIBUTE}="append"][data-dsh-uix-rolling] > :first-child {
+  animation: dsh-uix-roll-in var(--dsh-uix-roll, 260ms) var(--dsh-uix-ease, ease) both;
+}
+
+[${STREAM_ATTRIBUTE}="append"] > :first-child {
+  --dsh-uix-edge: 100000px;
+  mask-image: linear-gradient(
+    to right,
+    #000 calc(var(--dsh-uix-edge) - 1.2ch),
+    transparent var(--dsh-uix-edge)
+  );
 }
 
 [${STREAM_ATTRIBUTE}="roll"][data-dsh-uix-rolling]::after {
@@ -237,8 +268,12 @@ const STREAM_CSS = `
 
   [${STREAM_ATTRIBUTE}="roll"][data-dsh-uix-rolling] > *,
   [${STREAM_ATTRIBUTE}="roll"][data-dsh-uix-rolling]::after,
-  [${STREAM_ATTRIBUTE}="roll"][data-dsh-uix-appending] > * {
+  [${STREAM_ATTRIBUTE}="append"][data-dsh-uix-rolling] > :first-child {
     animation: none;
+  }
+
+  [${STREAM_ATTRIBUTE}="append"] > :first-child {
+    mask-image: none;
   }
 }
 `
@@ -271,6 +306,7 @@ interface ElementLike {
   readonly scrollHeight: number
   readonly clientHeight: number
   readonly clientWidth: number
+  readonly firstElementChild: ElementLike | null
   readonly parentElement: ElementLike | null
   readonly style: {
     setProperty(name: string, value: string): void
@@ -286,7 +322,6 @@ declare const document: {
   createElement(tag: 'style'): { textContent: string; remove(): void }
   createRange(): {
     selectNodeContents(node: unknown): void
-    setEnd(node: unknown, offset: number): void
     getBoundingClientRect(): { width: number }
   }
   readonly head: { appendChild(node: unknown): unknown }
@@ -313,14 +348,16 @@ export function createStreamMotion(): {
   let pending = false
   let installed = false
   let ease = ''
-  let rollMs = ROLL_BASE_MS
-  let enterMs = ENTER_BASE_MS
+  let rollMs = 260
+  let enterMs = ENTER_FALLBACK_MS
   let appendMs = APPEND_BASE_MS
+  let revealMinMs = 250
+  let revealMaxMs = 1200
   /**
    * Per-element run counter. Every start bumps it; a timer only clears the marks if
    * it still owns the current generation. Without this, the timeout left by an
    * earlier update fires mid-animation and strips the attributes the new one just
-   * set, which is what made an append look like a roll on alternate updates.
+   * set, which made alternate updates animate differently from each other.
    */
   const generation = new WeakMap<ElementLike, number>()
 
@@ -357,10 +394,8 @@ export function createStreamMotion(): {
   /**
    * Whether an element is a one-line label rather than the transcript body.
    *
-   * Two signals, both the application's own. A `TextShimmer` root
-   * (`data-shimmer`) is only ever used for a live inline label, never for a
-   * paragraph. A `data-streaming` element is a label when it is `nowrap` — the
-   * reasoning summary — and the body otherwise.
+   * A `data-streaming` element is a label when it is `nowrap` — the reasoning
+   * summary — and the body otherwise.
    *
    * Height cannot be used: a body sizes itself to its content, so its scroll height
    * equals its client height exactly like a one-line label's does.
@@ -368,9 +403,9 @@ export function createStreamMotion(): {
    * @param element - the live element.
    * @returns whether it should roll instead of reveal.
    */
-  function isLabel(element: ElementLike): boolean {
-    if (element.hasAttribute('data-shimmer')) return true
-    return window.getComputedStyle(element).whiteSpace === 'nowrap'
+  function modeOf(element: ElementLike): Mode {
+    if (element.hasAttribute('data-shimmer')) return 'append'
+    return window.getComputedStyle(element).whiteSpace === 'nowrap' ? 'roll' : 'reveal'
   }
 
   /**
@@ -398,7 +433,134 @@ export function createStreamMotion(): {
    * @returns the terminal reveal position in pixels.
    */
   function terminal(element: ElementLike, lineHeight: number): number {
-    return element.scrollHeight + lineHeight
+    // The boundary sits at the content edge; the trailing band fades over FADE_BAND
+    // line heights above it. Everything below the boundary is hidden, so a line that
+    // has just arrived is uncovered from its top down as the boundary descends — and
+    // the resting position has to clear the band, or the last line would stay partly
+    // transparent forever.
+    return element.scrollHeight + lineHeight * FADE_BAND
+  }
+
+  /**
+   * An element's text, whitespace-normalized, for change detection.
+   * @param element - the element.
+   * @returns its normalized text.
+   */
+  function textOf(element: ElementLike): string {
+    return (element.textContent ?? '').replace(/\s+/g, ' ').trim()
+  }
+
+  /**
+   * A label's own text.
+   *
+   * A `TextShimmer` root contains two copies of its children: the readable one and
+   * an inert decorative one it animates a sweep through. Reading `textContent` on
+   * the root therefore returns both, concatenated — enough to make any
+   * "did the text grow?" comparison fail, because the doubled previous string never
+   * prefixes the next update. Only the readable copy is read here.
+   *
+   * @param element - the live element.
+   * @returns its readable text, whitespace-normalized.
+   */
+  function labelText(element: ElementLike): string {
+    if (!element.hasAttribute('data-shimmer')) return textOf(element)
+    const content = firstChild(element)
+    return content === null ? '' : textOf(content)
+  }
+
+  /**
+   * Rendered width of a label's real text.
+   *
+   * `TextShimmer` renders two copies of its children: the readable one, then an
+   * inert decorative copy it animates its own sweep through. Only the first child is
+   * measured and masked here — masking the decorative copy as well would fight that
+   * sweep, which is what made these labels flicker.
+   *
+   * @param element - the shimmer root.
+   * @returns the readable text's width in pixels.
+   */
+  function contentWidth(element: ElementLike): number {
+    const content = firstChild(element)
+    if (content === null) return 0
+    const range = document.createRange()
+    range.selectNodeContents(content)
+    return range.getBoundingClientRect().width
+  }
+
+  /**
+   * The first child element, which for a shimmer is the readable copy.
+   * @param element - the parent.
+   * @returns the child, or null.
+   */
+  function firstChild(element: ElementLike): ElementLike | null {
+    return element.firstElementChild ?? null
+  }
+
+  /**
+   * Slide a step label up into place as it arrives.
+   * @param element - the shimmer root.
+   */
+  function enterLabel(element: ElementLike): void {
+    const run = nextGeneration(element)
+    element.removeAttribute('data-dsh-uix-rolling')
+    void element.scrollHeight
+    element.setAttribute('data-dsh-uix-rolling', '')
+    window.setTimeout(() => { retire(element, run, ['data-dsh-uix-rolling']) }, rollMs)
+  }
+
+  /**
+   * Reveal only the text a label gained since the previous update.
+   *
+   * These labels grow by appending — `A`, then `A, B`, then `A, B, C` — so rolling
+   * the whole line would re-animate text the reader has already read. Instead a
+   * horizontal edge sits where the old text ended and sweeps to the new width, so
+   * only the added characters arrive.
+   *
+   * A change that is not an extension of the previous text has nothing to preserve;
+   * it is shown at once rather than rolled, because for a step label the roll reads
+   * as the row sliding.
+   *
+   * @param element - the shimmer root.
+   * @param previous - the text before this update.
+   * @param previousWidth - rendered width of that text, in pixels.
+   */
+  function append(element: ElementLike, previous: string, previousWidth: number): void {
+    const now = labelText(element)
+    const content = firstChild(element)
+    if (content === null) return
+    const full = contentWidth(element)
+    element.setAttribute(WIDTH_ATTRIBUTE, String(full))
+    // A change that is not an extension has nothing to preserve; it is shown at once
+    // rather than rolled, because for a step label the roll reads as the row sliding.
+    if (previous === '' || !now.startsWith(previous) || previousWidth <= 0) return
+    if (full <= previousWidth + 1) return
+    const run = nextGeneration(element)
+    // One motion at a time: the arrival slide shares this element with the append
+    // sweep, and leaving its mark set would keep its animation applied for good.
+    element.removeAttribute('data-dsh-uix-rolling')
+    // Park the edge at the previous width with transitions off, force a style flush,
+    // then let the transition carry it to the new width. Without the flush the browser
+    // would coalesce both assignments and the sweep would not run.
+    content.style.transition = 'none'
+    content.style.setProperty('--dsh-uix-edge', `${previousWidth}px`)
+    void element.scrollHeight
+    content.style.transition = `--dsh-uix-edge ${appendMs}ms ${ease}`
+    content.style.setProperty('--dsh-uix-edge', `${full}px`)
+    window.setTimeout(() => {
+      if (!owns(element, run)) return
+      content.style.setProperty('--dsh-uix-edge', '100000px')
+      content.style.removeProperty('transition')
+    }, appendMs)
+  }
+
+  /**
+   * Whether a deferred follow-up still owns its element.
+   * @param element - the element.
+   * @param run - the generation the follow-up belongs to.
+   * @returns whether it is still the newest.
+   */
+  function owns(element: ElementLike, run: number): boolean {
+    return generation.get(element) === run
   }
 
   /**
@@ -410,9 +572,13 @@ export function createStreamMotion(): {
    */
   function revealDuration(gap: number): number {
     const active = settings as MotionSettings
-    const shaped = REVEAL_CURVE * Math.pow(Math.max(1, gap), REVEAL_EXPONENT)
-    const bounded = Math.min(REVEAL_MAX_MS, Math.max(REVEAL_MIN_MS, shaped)) * active.durationScale
-    return active.quantize ? quantizeMs(bounded) : bounded
+    // One line takes exactly the configured floor; each further line adds less than
+    // the last, because the exponent is below one. That is what makes speed — gap
+    // over duration — rise with the backlog instead of holding constant.
+    const perLine = revealMinMs / Math.pow(ONE_LINE_PX, REVEAL_EXPONENT)
+    const shaped = perLine * Math.pow(Math.max(ONE_LINE_PX, gap), REVEAL_EXPONENT)
+    const scaled = Math.min(revealMaxMs, Math.max(revealMinMs, shaped)) * active.durationScale
+    return active.quantize ? quantizeMs(scaled) : scaled
   }
 
   /**
@@ -463,23 +629,6 @@ export function createStreamMotion(): {
     state.frame = window.requestAnimationFrame(step)
   }
 
-  /**
-   * The rendered width of an element's text.
-   *
-   * A Range measures what the browser actually laid out, so the append boundary
-   * lands on a real glyph edge without splitting any text node. Character counting
-   * was tried instead and abandoned: the DOM interleaves whitespace nodes with the
-   * text, so an offset in the normalized string does not address the node the
-   * caller means.
-   *
-   * @param element - the label.
-   * @returns the width in pixels, or 0 when it cannot be measured.
-   */
-  function textWidth(element: ElementLike): number {
-    const range = document.createRange()
-    range.selectNodeContents(element as unknown as Node)
-    return range.getBoundingClientRect().width
-  }
 
   /**
    * Roll a live label: the line it showed before this update leaves upward while
@@ -495,7 +644,6 @@ export function createStreamMotion(): {
     const run = nextGeneration(element)
     // One animation at a time: the sweep and the roll share the element, and leaving
     // the other one's mark in place makes both play at once.
-    element.removeAttribute('data-dsh-uix-appending')
     element.setAttribute('data-dsh-uix-prev', before)
     element.removeAttribute('data-dsh-uix-rolling')
     void element.scrollHeight
@@ -503,73 +651,6 @@ export function createStreamMotion(): {
     window.setTimeout(() => {
       retire(element, run, ['data-dsh-uix-rolling', 'data-dsh-uix-prev'])
     }, rollMs)
-  }
-
-  /**
-   * Reveal only the text appended since the previous update.
-   *
-   * The work-step labels grow by appending — "A", then "A, B", then "A, B, C" — so
-   * sliding the whole line out and back in re-animates text the reader has already
-   * read. Instead a horizontal mask edge sits where the old text ended and sweeps
-   * right, so only the new characters arrive, one after another.
-   *
-   * A replacement rather than an append has nothing to preserve, and keeps the
-   * vertical roll.
-   *
-   * @param element - the label.
-   * @param previous - the text it showed before this update, whitespace-normalized.
-   * @param previousWidth - rendered width of that text, in pixels.
-   */
-  function append(element: ElementLike, previous: string, label: boolean): void {
-    const now = (element.textContent ?? '').replace(/\s+/g, ' ').trim()
-    element.setAttribute(LAST_ATTRIBUTE, now)
-    if (previous === '' || previous === now) return
-    const full = textWidth(element)
-    element.setAttribute(WIDTH_ATTRIBUTE, String(full))
-
-    // How much of the new text the reader has already seen. A label that grows by
-    // appending shares its whole previous text; a detail that slides its window
-    // shares only a suffix-length prefix. Measuring the shared prefix covers both,
-    // so the sweep starts at the first character that actually changed instead of
-    // replaying the line.
-    const shared = commonPrefix(previous, now)
-    const ratio = now.length === 0 ? 1 : shared / now.length
-    if (full <= 1) return
-
-    // A one-line label never rolls: the same text scrolling out and back in reads as
-    // the row sliding rather than as new text arriving, because a step label changes
-    // by growing. The multi-line reasoning summary is the opposite case — it stands
-    // for a whole paragraph, so when its line is replaced rather than extended there
-    // is no shared prefix and the vertical roll is the honest motion.
-    if (!label && ratio < 0.999) {
-      roll(element, previous)
-      return
-    }
-
-    const run = nextGeneration(element)
-    element.removeAttribute('data-dsh-uix-rolling')
-    element.removeAttribute('data-dsh-uix-prev')
-    element.style.setProperty('--dsh-uix-append', `${Math.round(full * ratio)}px`)
-    element.style.setProperty('--dsh-uix-append-end', `${Math.round(full)}px`)
-    element.removeAttribute('data-dsh-uix-appending')
-    void element.scrollHeight
-    element.setAttribute('data-dsh-uix-appending', '')
-    window.setTimeout(() => {
-      retire(element, run, ['data-dsh-uix-appending'])
-    }, appendMs)
-  }
-
-  /**
-   * Length of the prefix two strings share.
-   * @param left - the older text.
-   * @param right - the newer text.
-   * @returns the shared character count.
-   */
-  function commonPrefix(left: string, right: string): number {
-    const limit = Math.min(left.length, right.length)
-    let index = 0
-    while (index < limit && left.charCodeAt(index) === right.charCodeAt(index)) index += 1
-    return index
   }
 
   /**
@@ -591,17 +672,20 @@ export function createStreamMotion(): {
     element.removeAttribute(WIDTH_ATTRIBUTE)
     element.removeAttribute('data-dsh-uix-prev')
     element.removeAttribute('data-dsh-uix-rolling')
+    const content = firstChild(element)
     const clear = (): void => {
       element.style.removeProperty('--dsh-uix-reveal')
       element.style.removeProperty('--dsh-uix-tilt')
       element.style.removeProperty('transition')
+      content?.style.removeProperty('--dsh-uix-edge')
+      content?.style.removeProperty('transition')
     }
     if (immediately || state === undefined) {
       clear()
       return
     }
     element.style.setProperty('--dsh-uix-reveal', `${state.target + element.scrollHeight}px`)
-    window.setTimeout(clear, REVEAL_MAX_MS)
+    window.setTimeout(clear, revealMaxMs)
   }
 
   /** Re-measure every live element that still exists. */
@@ -660,28 +744,34 @@ export function createStreamMotion(): {
       const element = live[index]
       if (element === undefined || covered(element)) continue
       seen.add(element)
-      const mode = isLabel(element) ? 'roll' : 'reveal'
+      const mode = modeOf(element)
       const marked = element.getAttribute(STREAM_ATTRIBUTE)
       if (marked !== mode) {
         if (marked !== null) forget(element, true)
-        if (mode === 'roll') {
-          // A label starts by showing what it currently says; only the next change
-          // has a previous line to roll out.
-          element.setAttribute(LAST_ATTRIBUTE, (element.textContent ?? '').replace(/\s+/g, ' ').trim())
-          element.setAttribute(WIDTH_ATTRIBUTE, String(textWidth(element)))
-        } else {
+        if (mode === 'reveal') {
           // A body first seen mid-stream already shows what arrived before this
           // layer started watching; revealing that from zero would blank a message
           // the reader is looking at.
           const height = element.scrollHeight
           reveals.set(element, { current: height, from: height, target: height, frame: 0, started: 0, duration: 0 })
+        } else {
+          // Record what the label says now, then slide it in: the row arriving is the
+          // one moment worth animating vertically, and every later change is an
+          // append that must leave the row itself still.
+          element.setAttribute(LAST_ATTRIBUTE, labelText(element))
+          element.setAttribute(WIDTH_ATTRIBUTE, String(contentWidth(element)))
+          if (mode === 'append') enterLabel(element)
         }
         element.setAttribute(STREAM_ATTRIBUTE, mode)
       }
-      if (mode !== 'roll') continue
-      const text = (element.textContent ?? '').replace(/\s+/g, ' ').trim()
+      if (mode === 'reveal') continue
+      const text = labelText(element)
       const previous = element.getAttribute(LAST_ATTRIBUTE) ?? ''
-      if (previous !== text) append(element, previous, element.hasAttribute('data-shimmer'))
+      if (previous === text) continue
+      const previousWidth = Number.parseFloat(element.getAttribute(WIDTH_ATTRIBUTE) ?? '0')
+      element.setAttribute(LAST_ATTRIBUTE, text)
+      if (mode === 'roll') roll(element, previous)
+      else append(element, previous, Number.isFinite(previousWidth) ? previousWidth : 0)
     }
     unveil()
     // Anything still marked but no longer live has finished.
@@ -789,16 +879,18 @@ export function createStreamMotion(): {
       // so switching M3 / M3E or the duration multiplier reaches the stream layer
       // the same way it reaches every rewritten rule.
       ease = `cubic-bezier(${effectCurvePoints(next.mode).join(', ')})`
-      const scaled = ROLL_BASE_MS * next.durationScale
+      const scaled = next.streamRollMs * next.durationScale
       rollMs = next.quantize ? quantizeMs(scaled) : scaled
       document.documentElement.style.setProperty('--dsh-uix-ease', ease)
       document.documentElement.style.setProperty('--dsh-uix-roll', `${rollMs}ms`)
-      const scaledEnter = ENTER_BASE_MS * next.durationScale
+      const scaledEnter = next.streamEnterMs * next.durationScale
       enterMs = next.quantize ? quantizeMs(scaledEnter) : scaledEnter
-      document.documentElement.style.setProperty('--dsh-uix-enter', `${enterMs}ms`)
       const scaledAppend = APPEND_BASE_MS * next.durationScale
       appendMs = next.quantize ? quantizeMs(scaledAppend) : scaledAppend
       document.documentElement.style.setProperty('--dsh-uix-append-ms', `${appendMs}ms`)
+      revealMinMs = next.streamRevealMinMs
+      revealMaxMs = next.streamRevealMaxMs
+      document.documentElement.style.setProperty('--dsh-uix-enter', `${enterMs}ms`)
       install()
     },
     restore: uninstall,

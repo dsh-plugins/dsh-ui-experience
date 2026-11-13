@@ -94,6 +94,11 @@ export const Config = z.object({
   motionReduced: z.string().pattern(MOTION_REDUCED).default('system').volatile(),
   motionScroll: z.boolean().default(true).volatile(),
   motionStream: z.boolean().default(true).volatile(),
+  motionFollowScroll: z.boolean().default(true).volatile(),
+  streamRevealMinMs: z.number().min(60).max(2000).default(250).volatile(),
+  streamRevealMaxMs: z.number().min(200).max(8000).default(1200).volatile(),
+  streamEnterMs: z.number().min(0).max(2000).default(220).volatile(),
+  streamRollMs: z.number().min(0).max(2000).default(260).volatile(),
 })
 
 /** Resolved configuration: each field is a live getter. */
@@ -109,6 +114,11 @@ type Config = {
   motionReduced: VolatileValue<string>
   motionScroll: VolatileValue<boolean>
   motionStream: VolatileValue<boolean>
+  motionFollowScroll: VolatileValue<boolean>
+  streamRevealMinMs: VolatileValue<number>
+  streamRevealMaxMs: VolatileValue<number>
+  streamEnterMs: VolatileValue<number>
+  streamRollMs: VolatileValue<number>
 }
 
 /** Material You color roles the mapping consumes. */
@@ -448,6 +458,11 @@ function effectiveMotion(config: Config): MotionSettings {
     reduced: config.motionReduced.get() as MotionReduced,
     scroll: config.motionScroll.get(),
     stream: config.motionStream.get(),
+    followScroll: config.motionFollowScroll.get(),
+    streamRevealMinMs: config.streamRevealMinMs.get(),
+    streamRevealMaxMs: config.streamRevealMaxMs.get(),
+    streamEnterMs: config.streamEnterMs.get(),
+    streamRollMs: config.streamRollMs.get(),
   }
 }
 
@@ -817,10 +832,26 @@ class UiExperienceService extends TypertRemoteService {
     const quantize = args?.quantize
     const scroll = args?.scroll
     const stream = args?.stream
+    const followScroll = args?.followScroll
+    const streamRevealMinMs = args?.streamRevealMinMs
+    const streamRevealMaxMs = args?.streamRevealMaxMs
+    const streamEnterMs = args?.streamEnterMs
+    const streamRollMs = args?.streamRollMs
     if (mode === undefined && reduced === undefined && scale === undefined
       && spatialSplit === undefined && quantize === undefined && scroll === undefined
-      && stream === undefined) {
+      && stream === undefined && followScroll === undefined
+      && streamRevealMinMs === undefined && streamRevealMaxMs === undefined
+      && streamEnterMs === undefined && streamRollMs === undefined) {
       throw new Error('ui-experience: setMotion requires at least one field')
+    }
+    for (const [name, value] of [
+      ['streamRevealMinMs', streamRevealMinMs], ['streamRevealMaxMs', streamRevealMaxMs],
+      ['streamEnterMs', streamEnterMs], ['streamRollMs', streamRollMs],
+    ] as const) {
+      if (value === undefined) continue
+      if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) {
+        throw new Error(`ui-experience: ${name} must be a non-negative number, got ${String(value)}`)
+      }
     }
     if (mode !== undefined && !MOTION_MODE.test(mode)) {
       throw new Error(`ui-experience: unknown motion mode ${JSON.stringify(mode)}`)
@@ -845,6 +876,27 @@ class UiExperienceService extends TypertRemoteService {
     if (stream !== undefined && typeof stream !== 'boolean') {
       throw new Error(`ui-experience: stream must be a boolean, got ${typeof stream}`)
     }
+    if (followScroll !== undefined && typeof followScroll !== 'boolean') {
+      throw new Error(`ui-experience: followScroll must be a boolean, got ${typeof followScroll}`)
+    }
+    for (const [name, value] of [
+      ['streamRevealMinMs', streamRevealMinMs], ['streamRevealMaxMs', streamRevealMaxMs],
+      ['streamEnterMs', streamEnterMs], ['streamRollMs', streamRollMs],
+    ] as const) {
+      if (value === undefined) continue
+      if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) {
+        throw new Error(`ui-experience: ${name} must be a non-negative number, got ${String(value)}`)
+      }
+    }
+    for (const [name, value] of [
+      ['streamRevealMinMs', streamRevealMinMs], ['streamRevealMaxMs', streamRevealMaxMs],
+      ['streamEnterMs', streamEnterMs], ['streamRollMs', streamRollMs],
+    ] as const) {
+      if (value === undefined) continue
+      if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) {
+        throw new Error(`ui-experience: ${name} must be a non-negative number, got ${String(value)}`)
+      }
+    }
     await this.persist(current => ({
       ...current,
       ...(mode === undefined ? {} : { motion: mode }),
@@ -854,6 +906,11 @@ class UiExperienceService extends TypertRemoteService {
       ...(quantize === undefined ? {} : { motionQuantize: quantize }),
       ...(scroll === undefined ? {} : { motionScroll: scroll }),
       ...(stream === undefined ? {} : { motionStream: stream }),
+      ...(followScroll === undefined ? {} : { motionFollowScroll: followScroll }),
+      ...(streamRevealMinMs === undefined ? {} : { streamRevealMinMs }),
+      ...(streamRevealMaxMs === undefined ? {} : { streamRevealMaxMs }),
+      ...(streamEnterMs === undefined ? {} : { streamEnterMs }),
+      ...(streamRollMs === undefined ? {} : { streamRollMs }),
     }))
     const applied = effectiveMotion(this.config)
     logLine(`setMotion: mode=${applied.mode} durationScale=${String(applied.durationScale)}`

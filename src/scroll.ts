@@ -556,6 +556,146 @@ export function createScrollMotion(): {
     return active.reduced === 'system' && window.matchMedia('(prefers-reduced-motion: reduce)').matches
   }
 
+  /**
+   * In-flight follow glides, keyed by container.
+   *
+   * The transcript keeps its tail in view by assigning `scrollTop = floor` and then
+   * reading the property straight back to record where it landed
+   * (`use-chat-viewport.ts` `write`, and `use-scroll-follow.ts` `jump`). Writing the
+   * position one frame at a time therefore cannot work: the read-back would report
+   * the previous frame, the controller would conclude the content had pushed it off
+   * the bottom, and following would stop after a line or two.
+   *
+   * So while a glide runs, the getter reports the value that was asked for. The
+   * controller's bookkeeping then matches its own request exactly, `movedByReader`
+   * stays false for our own motion, and `nearBottom` keeps following on. Only the
+   * real accessor sees intermediate positions, and only this file calls it.
+   */
+  const glides = new Map<ElementLike, {
+    target: number
+    from: number
+    started: number
+    duration: number
+    frame: number
+    written: number
+  }>()
+
+  /** Last write time per container, to recognise a per-frame driver. */
+  const lastWrite = new WeakMap<ElementLike, number>()
+
+  const GLIDE_MIN_PX = 4
+  const GLIDE_MAX_PX = 600
+  const GLIDE_MIN_MS = 90
+  const GLIDE_MAX_MS = 300
+  const GLIDE_PX_PER_MS = 1.8
+  const GLIDE_FRAME_GAP_MS = 32
+
+  /**
+   * Furthest the painted position may fall behind the floor.
+   *
+   * A glide that is re-aimed before it finishes never catches up, so under steady
+   * output the tail would sit permanently a couple of lines above the bottom and
+   * clip the newest line. Past this the write goes through at once: the lag stays
+   * bounded, and a burst is absorbed by that catch-up rather than by an ever-growing
+   * backlog.
+   */
+  const GLIDE_MAX_LAG_PX = 40
+
+  /**
+   * Whether a `scrollTop` assignment should be eased.
+   *
+   * The caller's frame cadence is the discriminator. The follow loop writes once per
+   * content change, tens of milliseconds apart. A fold animation writes every frame,
+   * and easing those would put a second animation on top of the first.
+   *
+   * @param element - the container being written.
+   * @param value - the value being assigned.
+   * @param now - the current timestamp.
+   * @returns whether to glide.
+   */
+  function shouldGlide(element: ElementLike, value: number, now: number): boolean {
+    const active = settings
+    if (active === undefined || !active.followScroll) return false
+    if (wantsInstant()) return false
+    const max = maxima(element)
+    if (max.top <= 0) return false
+    const delta = value - topAxis!.get.call(element)
+    const size = Math.abs(delta)
+    if (size < GLIDE_MIN_PX || size > GLIDE_MAX_PX) return false
+    // Must be heading for the floor: that is what following means.
+    if (delta > 0 && Math.abs(value - max.top) > 4) return false
+    // Already too far behind to catch up smoothly: land it.
+    if (max.top - topAxis!.get.call(element) > GLIDE_MAX_LAG_PX) return false
+    const previous = lastWrite.get(element)
+    lastWrite.set(element, now)
+    if (previous !== undefined && now - previous < GLIDE_FRAME_GAP_MS) return false
+    return true
+  }
+
+  /**
+   * Start or re-aim a glide.
+   * @param element - the container.
+   * @param target - the value the caller asked for.
+   */
+  function startGlide(element: ElementLike, target: number): void {
+    const active = settings as MotionSettings
+    const existing = glides.get(element)
+    if (existing !== undefined) window.cancelAnimationFrame(existing.frame)
+    else hold(element)
+    const from = topAxis!.get.call(element)
+    const raw = Math.abs(target - from) / GLIDE_PX_PER_MS
+    const duration = Math.min(GLIDE_MAX_MS, Math.max(GLIDE_MIN_MS, raw)) * active.durationScale
+    const glide = {
+      target,
+      from,
+      started: performance.now(),
+      duration: active.quantize ? quantizeMs(duration) : duration,
+      frame: 0,
+      written: from,
+    }
+    glides.set(element, glide)
+    const mode = active.mode
+    const step = (now: number): void => {
+      const live = glides.get(element)
+      if (live !== glide) return
+      // Someone else moved it: a reader gesture, a reflow, a layout correction. The
+      // getter must stop claiming the target at that point.
+      if (Math.abs(topAxis!.get.call(element) - glide.written) > 1) {
+        finishGlide(element, false)
+        return
+      }
+      const progress = Math.min(1, (now - glide.started) / Math.max(1, glide.duration))
+      const eased = easeCurve(effectCurvePoints(mode), progress)
+      writeAxis(element, 'top', glide.from + (glide.target - glide.from) * eased)
+      glide.written = topAxis!.get.call(element)
+      if (progress >= 1) {
+        finishGlide(element, true)
+        return
+      }
+      glide.frame = window.requestAnimationFrame(step)
+    }
+    glide.frame = window.requestAnimationFrame(step)
+  }
+
+  /**
+   * End a glide.
+   * @param element - the container.
+   * @param landed - whether to land exactly on the target.
+   */
+  function finishGlide(element: ElementLike, landed: boolean): void {
+    const glide = glides.get(element)
+    if (glide === undefined) return
+    window.cancelAnimationFrame(glide.frame)
+    glides.delete(element)
+    if (landed) writeAxis(element, 'top', glide.target)
+    release(element, true)
+  }
+
+  /** End every glide, landing each exactly. */
+  function finishGlides(): void {
+    for (const [element] of glides) finishGlide(element, true)
+  }
+
   /** Stop the wheel run without landing, leaving the viewport where it is. */
   function stopWheel(): void {
     const active = wheel
@@ -942,6 +1082,9 @@ export function createScrollMotion(): {
    * @returns whether this input belongs to the run and was stopped.
    */
   function cancelIfOwned(target: EventTarget | null): boolean {
+    for (const [element] of glides) {
+      if (target === null || element.contains(target)) finishGlide(element, false)
+    }
     const active = run
     if (active === undefined || target === null) return false
     if (!active.legs.some(leg => leg.element.contains(target))) return false
@@ -999,6 +1142,27 @@ export function createScrollMotion(): {
     prototype.scrollTo = scrollTo
     prototype.scrollBy = scrollBy
     prototype.scrollIntoView = scrollIntoView
+    // The transcript follows with a plain `scrollTop` assignment, so that is the one
+    // write that has to be eased. The getter reports the target while a glide runs,
+    // which is what keeps the caller's immediate read-back — and therefore its follow
+    // decision — correct.
+    if (topAxis !== undefined) {
+      Object.defineProperty(Element.prototype, 'scrollTop', {
+        configurable: true,
+        enumerable: topAxis.enumerable,
+        get(this: ElementLike): number {
+          const glide = glides.get(this)
+          return glide === undefined ? topAxis.get.call(this) : glide.target
+        },
+        set(this: ElementLike, value: number) {
+          if (writing > 0 || !shouldGlide(this, value, performance.now())) {
+            topAxis.set.call(this, value)
+            return
+          }
+          startGlide(this, value)
+        },
+      })
+    }
     // Capture on the window reaches the scroller before any listener the consumer
     // registered, whether it listens on the element or on the window.
     window.addEventListener('scrollend', onScrollEnd, true)
@@ -1014,6 +1178,7 @@ export function createScrollMotion(): {
 
   /** Remove the patches and the listeners, and stop any run in flight. */
   function uninstall(): void {
+    finishGlides()
     cancel(false)
     clearGrace()
     if (!installed) return
@@ -1027,6 +1192,14 @@ export function createScrollMotion(): {
     prototype.scrollTo = shipped.scrollTo
     prototype.scrollBy = shipped.scrollBy
     prototype.scrollIntoView = shipped.scrollIntoView
+    if (topAxis !== undefined) {
+      Object.defineProperty(Element.prototype, 'scrollTop', {
+        configurable: true,
+        enumerable: topAxis.enumerable,
+        get: topAxis.get,
+        set: topAxis.set,
+      })
+    }
     window.removeEventListener('scrollend', onScrollEnd, true)
     ;(window.removeEventListener as (kind: string, listener: unknown, capture: unknown) => void)(
       'wheel', onWheelBubble, false,
