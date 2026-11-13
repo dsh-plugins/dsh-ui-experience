@@ -2,7 +2,7 @@
   "name": "@dsh-plugin/dsh-ui-experience",
   "version": "1.0.0",
   "type": "module",
-  "description": "UI experience enhancements for DeepSeek Harness: follow the system matugen Material You palette as the interface theme.",
+  "description": "UI experience enhancements for DeepSeek Harness: follow the system matugen Material You palette as the interface theme, and rewrite interface motion onto Material 3 / Material 3 Expressive curves.",
   "license": "MIT",
   "repository": {
     "type": "git",

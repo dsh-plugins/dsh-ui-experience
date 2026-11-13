@@ -86,4 +86,32 @@ export const ROW_CSS = `
 .dsh-uix-switch-thumb{display:block;width:16px;height:16px;border-radius:50%;corner-shape:round;background:var(--dsw-alias-label-primary-foreground);transition:transform 120ms ease}
 .dsh-uix-switch[aria-checked=false] .dsh-uix-switch-thumb{background:var(--dsw-alias-switch-thumb)}
 .dsh-uix-switch[aria-checked=true] .dsh-uix-switch-thumb{transform:translate(16px)}
+
+/* A labelled control line: the caption column and the control that follows it,
+   mirroring the settings form's label/control pairing. */
+.dsh-uix-choice{display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap}
+.dsh-uix-choice-label{font-size:13px;font-weight:500;line-height:1.5;color:var(--dsw-alias-label-primary)}
+
+/* Segmented control: SegmentedControl.module.css .control / .indicator / .tab —
+   a hover-wash track holding one sliding pill. The indicator is placed
+   arithmetically from the segment count and index carried as custom properties,
+   so nothing measures the DOM. */
+.dsh-uix-segment{position:relative;display:inline-grid;grid-auto-flow:column;grid-auto-columns:1fr;gap:2px;padding:4px;border-radius:var(--dsw-radius-md);background:var(--dsw-alias-interactive-bg-hover)}
+.dsh-uix-segment-indicator{position:absolute;top:4px;left:4px;width:calc((100% - 8px - 2px * (var(--dsh-segment-count) - 1)) / var(--dsh-segment-count));height:calc(100% - 8px);border:0;border-radius:var(--dsw-radius-sm);background:var(--dsw-alias-bg-layer-1);box-shadow:var(--dsw-elevation-soft);transform:translateX(calc(var(--dsh-segment-index) * (100% + 2px)));transition:transform 160ms ease;pointer-events:none}
+.dsh-uix-segment-tab{box-sizing:border-box;position:relative;z-index:1;height:28px;padding:0 16px;border:0;border-radius:var(--dsw-radius-sm);background:transparent;color:var(--dsw-alias-label-secondary);font:inherit;font-size:13px;line-height:20px;font-weight:500;white-space:nowrap;cursor:pointer;transition:color 120ms ease}
+.dsh-uix-segment-tab[aria-selected=true]{color:var(--dsw-alias-label-primary)}
+.dsh-uix-segment-tab:hover:not(:disabled){color:var(--dsw-alias-label-primary)}
+.dsh-uix-segment-tab:disabled{cursor:default;opacity:.4}
+.dsh-uix-segment-tab:focus-visible{outline:var(--dsw-focus-ring-width) solid var(--dsw-focus-ring-color,var(--dsw-alias-state-business-primary));outline-offset:-2px}
+
+/* Checkbox: Checkbox.module.css — a native input so the platform draws and keys
+   it, tinted with the brand accent, with the explanation stacked underneath. */
+.dsh-uix-check{display:flex;align-items:flex-start;gap:6px;padding:10px 0;font-size:14px;line-height:20px;color:var(--dsw-alias-label-primary);cursor:pointer}
+.dsh-uix-check+.dsh-uix-check{border-top:0.5px solid var(--dsw-alias-border-l2)}
+.dsh-uix-check input{flex:0 0 auto;width:16px;height:16px;margin:2px 0 0;accent-color:var(--dsw-alias-brand-primary);cursor:inherit}
+.dsh-uix-check input:focus-visible{outline:var(--dsw-focus-ring-width) solid var(--dsw-focus-ring-color,var(--dsw-alias-state-business-primary));outline-offset:2px}
+.dsh-uix-check:has(input:disabled){cursor:default;opacity:.5}
+.dsh-uix-check-text{display:flex;flex-direction:column;gap:2px;min-width:0}
+.dsh-uix-check-label{font-size:13px;font-weight:500;line-height:1.5;color:var(--dsw-alias-label-primary)}
+.dsh-uix-check-hint{font-size:12px;line-height:1.5;font-weight:400;color:var(--dsw-alias-label-tertiary)}
 `

@@ -19,7 +19,9 @@ import z from '@deepseek-ai/schemastery'
 import { TypertRemoteService } from '@deepseek-ai/dsh-typert-protocol'
 import {
   BOOT_ATTRIBUTE, DEFAULT_COLORS_PATH, DEFAULT_TOKENS_PATH, REMOTE_SERVICE,
+  type MotionMode, type MotionReduced, type MotionSettings,
   type PalettePaths, type PollArgs, type PollResult, type SetActiveArgs, type SetActiveResult,
+  type SetMotionArgs, type SetMotionResult,
   type SetPathsArgs, type SetPathsResult, type ThemeTokenModes, type ThemeTokenTable,
 } from './shared.ts'
 
@@ -73,12 +75,23 @@ const BORDER_WIDTH = /^(?:0|[0-9]+(?:\.[0-9]+)?(?:px|rem|em))$/
 /** Valid palette path: absolute, or `~` / `~/`-relative. */
 const PATH_PATTERN = /^(?:~$|~\/|\/)/
 
+/** Valid motion curve family. */
+const MOTION_MODE = /^(?:off|m3|m3e)$/
+
+/** Valid reduced-motion policy. */
+const MOTION_REDUCED = /^(?:system|always)$/
+
 /** Plugin configuration. Every field is volatile, so edits apply in place. */
 export const Config = z.object({
   active: z.boolean().default(false).volatile(),
   borderWidth: z.string().pattern(BORDER_WIDTH).default('0.5px').volatile(),
   colorsPath: z.string().pattern(PATH_PATTERN).default(DEFAULT_COLORS_PATH).volatile(),
   tokensPath: z.string().pattern(PATH_PATTERN).default(DEFAULT_TOKENS_PATH).volatile(),
+  motion: z.string().pattern(MOTION_MODE).default('off').volatile(),
+  motionDurationScale: z.number().min(0.5).max(2).default(1).volatile(),
+  motionSpatialSplit: z.boolean().default(true).volatile(),
+  motionQuantize: z.boolean().default(false).volatile(),
+  motionReduced: z.string().pattern(MOTION_REDUCED).default('system').volatile(),
 })
 
 /** Resolved configuration: each field is a live getter. */
@@ -87,6 +100,11 @@ type Config = {
   borderWidth: VolatileValue<string>
   colorsPath: VolatileValue<string>
   tokensPath: VolatileValue<string>
+  motion: VolatileValue<string>
+  motionDurationScale: VolatileValue<number>
+  motionSpatialSplit: VolatileValue<boolean>
+  motionQuantize: VolatileValue<boolean>
+  motionReduced: VolatileValue<string>
 }
 
 /** Material You color roles the mapping consumes. */
@@ -410,6 +428,23 @@ function effectivePaths(config: Config): PalettePaths {
   return { colors: config.colorsPath.get(), tokens: config.tokensPath.get() }
 }
 
+/**
+ * Read the live motion settings. The schema pins both enumerations and the
+ * duration-scale range, so the stored values are already a `MotionSettings`; the
+ * casts only narrow the plain strings the resolved configuration exposes.
+ * @param config - resolved plugin configuration.
+ * @returns the motion settings in force.
+ */
+function effectiveMotion(config: Config): MotionSettings {
+  return {
+    mode: config.motion.get() as MotionMode,
+    durationScale: config.motionDurationScale.get(),
+    spatialSplit: config.motionSpatialSplit.get(),
+    quantize: config.motionQuantize.get(),
+    reduced: config.motionReduced.get() as MotionReduced,
+  }
+}
+
 /** One parsed palette, tagged with the file and version it came from. */
 interface Palette {
   source: string
@@ -696,7 +731,8 @@ class UiExperienceService extends TypertRemoteService {
 
   /**
    * Remote poll endpoint: report the palette when it changed since the caller's
-   * known version, and always report the live switch, border width, and paths.
+   * known version, and always report the live switch, border width, paths, and
+   * motion settings.
    * @param args - the caller's last seen version.
    * @returns the poll payload.
    */
@@ -704,16 +740,20 @@ class UiExperienceService extends TypertRemoteService {
     const read = await readPalette(this.config)
     const active = this.config.active.get()
     const borderWidth = this.config.borderWidth.get()
+    const motion = effectiveMotion(this.config)
     if (!read.ok) {
-      return { status: read.status, message: read.message, active, borderWidth, paths: read.paths }
+      return { status: read.status, message: read.message, active, borderWidth, paths: read.paths, motion }
     }
     const { palette, paths } = read
     if (args?.known === palette.version) {
-      return { status: 'ok', changed: false, version: palette.version, source: palette.source, active, borderWidth, paths }
+      return {
+        status: 'ok', changed: false, version: palette.version, source: palette.source,
+        active, borderWidth, paths, motion,
+      }
     }
     return {
       status: 'ok', changed: true, version: palette.version, tokens: palette.tokens,
-      source: palette.source, active, borderWidth, paths,
+      source: palette.source, active, borderWidth, paths, motion,
     }
   }
 
@@ -757,6 +797,47 @@ class UiExperienceService extends TypertRemoteService {
   }
 
   /**
+   * Remote endpoint persisting the motion layer settings. Every field is
+   * optional, and an omitted field keeps its stored value so one control can be
+   * changed without resending the rest.
+   * @param args - the fields to write.
+   * @returns the settings now in effect.
+   */
+  async setMotion(args?: SetMotionArgs): Promise<SetMotionResult> {
+    const mode = args?.mode
+    const reduced = args?.reduced
+    const scale = args?.durationScale
+    const spatialSplit = args?.spatialSplit
+    const quantize = args?.quantize
+    if (mode === undefined && reduced === undefined && scale === undefined
+      && spatialSplit === undefined && quantize === undefined) {
+      throw new Error('ui-experience: setMotion requires at least one field')
+    }
+    if (mode !== undefined && !MOTION_MODE.test(mode)) {
+      throw new Error(`ui-experience: unknown motion mode ${JSON.stringify(mode)}`)
+    }
+    if (reduced !== undefined && !MOTION_REDUCED.test(reduced)) {
+      throw new Error(`ui-experience: unknown reduced-motion policy ${JSON.stringify(reduced)}`)
+    }
+    if (scale !== undefined && (!Number.isFinite(scale) || scale < 0.5 || scale > 2)) {
+      throw new Error(`ui-experience: durationScale ${String(scale)} is outside 0.5–2`)
+    }
+    await this.persist(current => ({
+      ...current,
+      ...(mode === undefined ? {} : { motion: mode }),
+      ...(reduced === undefined ? {} : { motionReduced: reduced }),
+      ...(scale === undefined ? {} : { motionDurationScale: scale }),
+      ...(spatialSplit === undefined ? {} : { motionSpatialSplit: spatialSplit }),
+      ...(quantize === undefined ? {} : { motionQuantize: quantize }),
+    }))
+    const applied = effectiveMotion(this.config)
+    logLine(`setMotion: mode=${applied.mode} durationScale=${String(applied.durationScale)}`
+      + ` spatialSplit=${String(applied.spatialSplit)} quantize=${String(applied.quantize)}`
+      + ` reduced=${applied.reduced}`)
+    return applied
+  }
+
+  /**
    * Write one configuration change through the config editor, logging the
    * failure before it reaches the caller.
    * @param change - derives the next raw config from the current one.
@@ -783,6 +864,7 @@ Object.defineProperty(UiExperienceService.prototype, REMOTE_METHOD_DESCRIPTOR, {
       Object.freeze({ method: 'poll', invocation: Object.freeze({ kind: 'direct' }) }),
       Object.freeze({ method: 'setActive', invocation: Object.freeze({ kind: 'direct' }) }),
       Object.freeze({ method: 'setPaths', invocation: Object.freeze({ kind: 'direct' }) }),
+      Object.freeze({ method: 'setMotion', invocation: Object.freeze({ kind: 'direct' }) }),
     ]),
   }),
 })
@@ -797,7 +879,8 @@ export const inject = ['configEditor']
  */
 export function apply(ctx: HostContext, config: Config): void {
   logLine(`apply: active=${String(config.active.get())} borderWidth=${config.borderWidth.get()}`
-    + ` colorsPath=${config.colorsPath.get()} tokensPath=${config.tokensPath.get()}`)
+    + ` colorsPath=${config.colorsPath.get()} tokensPath=${config.tokensPath.get()}`
+    + ` motion=${config.motion.get()} durationScale=${String(config.motionDurationScale.get())}`)
   // Register the service directly instead of ctx.plugin(class) so constructor
   // failures surface immediately instead of disappearing into a parked fiber.
   try {

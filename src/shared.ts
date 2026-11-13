@@ -15,6 +15,13 @@ export const REMOTE_SERVICE = 'uiExperience'
  */
 export const BOOT_ATTRIBUTE = 'data-dsh-uix-matugen'
 
+/**
+ * Attribute the client sets on `<html>` while the motion layer is rewriting
+ * rules, so a page-wide style probe or a screenshot harness can tell whether a
+ * curve came from this bundle or from the shipped sheet.
+ */
+export const MOTION_ATTRIBUTE = 'data-dsh-uix-motion'
+
 /** Default matugen colors file, written by the user's quickshell setup. */
 export const DEFAULT_COLORS_PATH = '~/.local/state/quickshell/user/generated/colors.json'
 
@@ -36,15 +43,42 @@ export interface PalettePaths {
   tokens: string
 }
 
+/** Motion curve family. `off` leaves every shipped declaration untouched. */
+export type MotionMode = 'off' | 'm3' | 'm3e'
+
+/** Which reduced-motion policy the layer follows. */
+export type MotionReduced = 'system' | 'always'
+
+/** Every knob of the motion layer, as the client needs it. */
+export interface MotionSettings {
+  mode: MotionMode
+  /** Multiplier applied to every rewritten literal duration. */
+  durationScale: number
+  /** Whether spatial and effects transitions take different curves. */
+  spatialSplit: boolean
+  /** Whether rewritten durations snap onto the Material duration ladder. */
+  quantize: boolean
+  reduced: MotionReduced
+}
+
+/** A motion layer that already did nothing; the client compares against it. */
+export const MOTION_OFF: MotionSettings = {
+  mode: 'off',
+  durationScale: 1,
+  spatialSplit: true,
+  quantize: false,
+  reduced: 'system',
+}
+
 /** Arguments of the poll endpoint: the caller's last seen palette version. */
 export interface PollArgs {
   known?: string
 }
 
 /**
- * Result of the poll endpoint. `active`, `borderWidth`, and `paths` ride every
- * response, so a configuration-only edit reaches the client without waiting
- * for a matugen regeneration.
+ * Result of the poll endpoint. `active`, `borderWidth`, `paths`, and `motion`
+ * ride every response, so a configuration-only edit reaches the client without
+ * waiting for a matugen regeneration.
  */
 export type PollResult =
   | {
@@ -56,6 +90,7 @@ export type PollResult =
     active: boolean
     borderWidth: string
     paths: PalettePaths
+    motion: MotionSettings
   }
   | {
     status: 'missing' | 'error'
@@ -63,6 +98,7 @@ export type PollResult =
     active: boolean
     borderWidth: string
     paths: PalettePaths
+    motion: MotionSettings
   }
 
 /** Arguments of the setActive endpoint. */
@@ -85,3 +121,15 @@ export interface SetPathsArgs {
 export interface SetPathsResult {
   paths: PalettePaths
 }
+
+/** Arguments of the setMotion endpoint; an omitted field keeps its value. */
+export interface SetMotionArgs {
+  mode?: MotionMode
+  durationScale?: number
+  spatialSplit?: boolean
+  quantize?: boolean
+  reduced?: MotionReduced
+}
+
+/** Result of the setMotion endpoint: the settings now in effect. */
+export type SetMotionResult = MotionSettings
