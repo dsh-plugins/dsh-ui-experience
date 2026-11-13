@@ -146,19 +146,11 @@ export interface MotionRuntime {
    */
   apply(settings: MotionSettings): void
   /**
-   * Rewrite declarations that appeared since the last scan — a lazily mounted
-   * panel, a client plugin that injected its own sheet — without disturbing the
-   * ones already rewritten.
-   */
-  refresh(): void
-  /**
    * Undo every page-level change and stop following the page: declarations,
    * duration tokens, the still-page sheet, the preference listener, and the
    * observer.
    */
   restore(): void
-  /** Same as `restore`; the name marks the bundle's unmount path. */
-  dispose(): void
 }
 
 /**
@@ -338,6 +330,10 @@ export function createMotion(): MotionRuntime {
 
   /** One full scan: rewrite every rule not yet touched. */
   function scan(): void {
+    // A rescan can be queued as a microtask and then lose the race to an apply
+    // that put the still-page policy in force; writing curves then would undo the
+    // restore that apply just performed.
+    if (wantsReduced()) return
     const active = settings
     if (active === undefined || active.mode === 'off') return
     const sheets = readableSheets()
@@ -545,8 +541,6 @@ export function createMotion(): MotionRuntime {
       document.documentElement.setAttribute(MOTION_ATTRIBUTE, next.mode)
       realize()
     },
-    refresh,
     restore,
-    dispose(): void { restore() },
   }
 }

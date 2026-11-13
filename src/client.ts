@@ -977,7 +977,7 @@ function registerClient(): void {
             teardown()
             // The motion layer owns page-wide declaration rewrites, so it is
             // torn down on unmount even though the palette switch never gated it.
-            motion.dispose()
+            motion.restore()
           }
         }, 'ui-experience: page-level layers')
         void poll()
