@@ -601,6 +601,7 @@ class UiExperienceService extends TypertRemoteService {
     super(ctx as never, REMOTE_SERVICE)
   }
 
+
   /**
    * Remote poll endpoint: report the palette when it changed since the caller's
    * known version, and always report the live switch, border width, and paths.

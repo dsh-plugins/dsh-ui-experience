@@ -209,11 +209,16 @@ function registerClient(): void {
       /**
        * Bundle body, mounted inside the injected Remote scope so every
        * registration and listener shares the namespace's lifetime.
-       * @param registry - the theme registry the override layer is stacked on.
+       *
+       * The theme service is resolved on every use rather than captured once:
+       * the registry object is re-created when the theme package reloads (HMR,
+       * upgrade), and a captured reference would keep stacking layers onto a
+       * dead runtime. The page would silently fall back to the built-in palette
+       * while this bundle still believed its palette was mounted.
        * @param ctx - the bundle's restricted client context.
        * @param gateway - the currently running instance of our own service.
        */
-      function run(registry: ThemeLike, ctx: ClientContext, gateway: UiExperienceRemoteNamespace): void {
+      function run(ctx: ClientContext, gateway: UiExperienceRemoteNamespace): void {
         const t = ctx.locale.bind('ui-experience')
         ctx.effect(() => ctx.locale.register('ui-experience', DICTS), 'ui-experience: dictionaries')
         ctx.effect(() => {
@@ -243,6 +248,19 @@ function registerClient(): void {
         let paintedWidth = ''
         let disposeOverride: (() => void) | undefined
         let borderSheet: { textContent: string; remove(): void } | undefined
+        /** Registry the current override layer was stacked on, and its version. */
+        let mountedOn: ThemeLike | undefined
+        let mountedVersion: string | undefined
+        /** Set while a token refetch triggered by a stale mount is in flight. */
+        let remounting = false
+
+        /**
+         * The live theme service. Falls back to the last known instance only
+         * while the service is briefly unavailable during a reload.
+         * @returns the registry to stack overrides on.
+         */
+        const registryNow = (): ThemeLike | undefined =>
+          (ctx.get('theme') as ThemeLike | undefined) ?? mountedOn
 
         let view: ViewState = {
           active: false,
@@ -281,6 +299,8 @@ function registerClient(): void {
         const clearOverride = (): void => {
           disposeOverride?.()
           disposeOverride = undefined
+          mountedOn = undefined
+          mountedVersion = undefined
         }
 
         /**
@@ -289,17 +309,63 @@ function registerClient(): void {
          * choice keeps working underneath it.
          * @param modes - validated token modes.
          */
-        const applyPalette = (modes: ThemeTokenModes): void => {
+        const applyPalette = (modes: ThemeTokenModes, version: string): void => {
           if (disposed) return
+          const registry = registryNow()
+          if (registry === undefined) {
+            publish({ problem: 'theme service is unavailable; palette not applied' })
+            return
+          }
           clearOverride()
           try {
             disposeOverride = registry.overrideTokens(SOURCE, toOverrides(modes))
+            mountedOn = registry
+            mountedVersion = version
           } catch (error) {
+            mountedOn = undefined
+            mountedVersion = undefined
             const message = `theme override rejected: ${(error as Error).message}`
             console.error(`ui-experience: ${message}`)
             publish({ problem: message })
           }
         }
+
+        /**
+         * Whether the palette should be stacked but is not, or is stacked on a
+         * stale registry. This is the self-healing check for a theme reload.
+         * @param version - palette version the host currently reports.
+         * @returns whether a full refetch is needed.
+         */
+        const needsRemount = (version: string): boolean =>
+          remounting === false
+          && (disposeOverride === undefined
+            || mountedOn !== registryNow()
+            || mountedVersion !== version)
+
+        /**
+         * Refetch the palette with an unknown version so the Host returns the
+         * tokens, then stack them on the live registry.
+         */
+        const remount = async (): Promise<void> => {
+          if (disposed || remounting) return
+          remounting = true
+          try {
+            const answer = unwrap<PollResult>(await gateway.poll({}))
+            if (disposed || answer.status !== 'ok' || answer.tokens === undefined) return
+            known = answer.version
+            applyPalette(answer.tokens, answer.version)
+            applyBorder(answer.borderWidth)
+          } catch (error) {
+            const message = (error as Error).message
+            if (message !== lastRpcProblem) {
+              lastRpcProblem = message
+              console.error(`ui-experience: palette refetch failed: ${message}`)
+            }
+          } finally {
+            remounting = false
+          }
+        }
+
 
         /**
          * Paint the border-width sheet, replacing the previous one. An invalid
@@ -379,7 +445,7 @@ function registerClient(): void {
             publish({ active: answer.active })
             if (answer.active) {
               setBootAttribute(true)
-              if (answer.status === 'ok' && answer.tokens !== undefined) applyPalette(answer.tokens)
+              if (answer.status === 'ok' && answer.tokens !== undefined) applyPalette(answer.tokens, answer.version)
               applyBorder(answer.borderWidth)
             } else {
               teardown()
@@ -399,7 +465,11 @@ function registerClient(): void {
           }
           if (answer.changed) {
             known = answer.version
-            if (view.active && answer.tokens !== undefined) applyPalette(answer.tokens)
+            if (view.active && answer.tokens !== undefined) applyPalette(answer.tokens, answer.version)
+          } else if (view.active && needsRemount(answer.version)) {
+            // The palette is on but not (or no longer) stacked on the live
+            // registry: fetch the tokens again instead of trusting `known`.
+            void remount()
           }
           if (view.active) applyBorder(answer.borderWidth)
         }
@@ -464,7 +534,7 @@ function registerClient(): void {
             bootstrapped = true
             setBootAttribute(true)
             publish({ active: true, paths: answer.paths, notice: t('palette.saved') })
-            applyPalette(tokens)
+            applyPalette(tokens, answer.version)
             applyBorder(answer.borderWidth)
           } catch (error) {
             const message = (error as Error).message
@@ -496,7 +566,7 @@ function registerClient(): void {
               notice: probe.status === 'ok' ? t('palette.saved') : '',
               problem: probe.status === 'ok' ? '' : probe.message,
             })
-            if (probe.status === 'ok' && view.active && probe.tokens !== undefined) applyPalette(probe.tokens)
+            if (probe.status === 'ok' && view.active && probe.tokens !== undefined) applyPalette(probe.tokens, probe.version)
           } catch (error) {
             const message = (error as Error).message
             console.error(`ui-experience: failed to save the palette paths: ${message}`)
@@ -639,7 +709,7 @@ function registerClient(): void {
             console.error('ui-experience: the remote namespace was not installed after mounting the contribution')
             return
           }
-          run(theme, ctx, gateway)
+          run(ctx, gateway)
         },
       }
     },
