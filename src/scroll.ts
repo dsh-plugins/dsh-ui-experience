@@ -274,6 +274,19 @@ export function createScrollMotion(): {
    */
   const END_GRACE_MS = 120
 
+  /**
+   * Containers currently inside that grace window. A `WeakMap` cannot be walked,
+   * and a reader who starts scrolling right after a run lands must not have their
+   * own end swallowed, so the same members are listed here to be cleared.
+   */
+  const graceful = new Set<ElementLike>()
+
+  /** Stop withholding ends from every container still inside the grace window. */
+  function clearGrace(): void {
+    for (const element of graceful) shadowed.delete(element)
+    graceful.clear()
+  }
+
   /** Shadow one container for as long as a run is moving it. */
   function hold(element: ElementLike): void {
     shadowed.set(element, Number.POSITIVE_INFINITY)
@@ -289,6 +302,7 @@ export function createScrollMotion(): {
   function release(element: ElementLike, notify: boolean): void {
     if (!shadowed.has(element)) return
     shadowed.set(element, performance.now() + END_GRACE_MS)
+    graceful.add(element)
     if (!notify) return
     // Async so the position write that ended the run is visible to the listener,
     // the way it is when the browser raises the real event.
@@ -461,21 +475,18 @@ export function createScrollMotion(): {
   }
 
   /**
-   * Read either calling convention into absolute offsets.
-   * @param options - the options object or the legacy x argument.
-   * @param y - the legacy y argument.
+   * Resolve a request's offsets against an origin.
+   *
+   * Only the object form reaches here: `behavior: 'smooth'` cannot be expressed by
+   * the legacy `scrollTo(x, y)` call, which is forwarded to the browser instead.
+   * @param options - the options object.
    * @param base - the origin the request is resolved against.
    * @returns the resolved offsets; `undefined` leaves that axis alone.
    */
   function readOffsets(
-    options: ScrollToOptions | number | undefined,
-    y: number | undefined,
+    options: ScrollToOptions,
     base: { top: number; left: number },
   ): { top: number | undefined; left: number | undefined } {
-    if (typeof options === 'number') {
-      return { left: base.left + options, top: y === undefined ? undefined : base.top + y }
-    }
-    if (options === undefined || options === null) return { top: undefined, left: undefined }
     return {
       left: options.left === undefined ? undefined : base.left + options.left,
       top: options.top === undefined ? undefined : base.top + options.top,
@@ -527,7 +538,7 @@ export function createScrollMotion(): {
     const base = relative
       ? { top: element.scrollTop, left: element.scrollLeft }
       : { top: 0, left: 0 }
-    const request = readOffsets(options, args[1] as number | undefined, base)
+    const request = readOffsets(options as ScrollToOptions, base)
     const leg = legFor(element, request.top, request.left)
     // A request that changes nothing still resolves, like the native call.
     if (leg === undefined) return Promise.resolve()
@@ -558,6 +569,7 @@ export function createScrollMotion(): {
     if (until !== Number.POSITIVE_INFINITY && performance.now() > until) {
       // The grace window has passed: this end belongs to whatever scrolled next.
       shadowed.delete(target)
+      graceful.delete(target)
       return
     }
     event.stopImmediatePropagation()
@@ -570,7 +582,12 @@ export function createScrollMotion(): {
    */
   function onTakeover(event: EventLike): void {
     const active = run
-    if (active === undefined) return
+    if (active === undefined) {
+      // No run to stop, but an end still owed for the last one must not be
+      // withheld from the scroll this input is about to start.
+      clearGrace()
+      return
+    }
     if (event.type === 'keydown') {
       // Keys scroll only when focus is not in a field that consumes them.
       if (event.key === undefined || !SCROLL_KEYS.has(event.key)) return
@@ -606,6 +623,7 @@ export function createScrollMotion(): {
   /** Remove the patches and the listeners, and stop any run in flight. */
   function uninstall(): void {
     cancel(false)
+    clearGrace()
     if (!installed) return
     installed = false
     const prototype = Element.prototype as unknown as Record<string, unknown>
