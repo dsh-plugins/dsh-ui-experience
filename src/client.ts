@@ -18,6 +18,7 @@ import {
 } from './shared.ts'
 import { createMotion } from './motion.ts'
 import { createScrollMotion } from './scroll.ts'
+import { createStreamMotion } from './stream.ts'
 import { ROW_CSS } from './styles.ts'
 
 /** Minimal React face the bundle uses (the real React arrives from the loader). */
@@ -207,6 +208,8 @@ function uiExperienceRemoteContribution(zod: ZodLike): { package: string; descri
         spatialSplit: zod.boolean().optional(),
         quantize: zod.boolean().optional(),
         reduced: zod.string().optional(),
+        scroll: zod.boolean().optional(),
+        stream: zod.boolean().optional(),
       }), 'SetMotionArgs'),
     ],
   }
@@ -237,6 +240,8 @@ const DICTS: Record<string, Record<string, string>> = {
     'motion.spatial-split-hint': '位移曲线带过冲（快位移约 9%，默认位移约 1.4%），效果曲线没有。关闭后全部使用效果曲线。',
     'motion.quantize': '时长对齐到 Material 档位',
     'motion.quantize-hint': '把改写后的时长吸附到 50/100/150/200/250/300/350/400/450/500/550/600/700/800/900/1000ms。',
+    'motion.stream': '流式文本渐进显现',
+    'motion.stream-hint': '正文与思考摘要在生成时逐段显现，而不是随每次分片一次跳出。做法是移动一条遮罩线而不是截断文字——文字从一开始就完整存在，选择、复制与读屏都不受影响；显现速度按积压量自适应，输出突发时追得快，输出缓慢时走得慢。',
     'motion.scroll': '滚动使用同一曲线',
     'motion.scroll-hint': '接管平滑滚动（轨迹行定位、插件卡片居中、会话检查器跳转、流式跟随），改用本页曲线；同一容器上的重复请求会被并入正在进行的滚动，不会每帧重来。脚本滚动会逐帧产生 scrollend，本插件同时屏蔽这些事件，只在落位或被取消时放行一次，因此依赖「滚动已停」判断的消费方看到的节奏与原生一致。读者一旦在容器上滚轮、触摸或按滚动键，脚本滚动立即停止并交还原生控制。',
     'motion.reduced': '始终减弱动效',
@@ -269,6 +274,8 @@ const DICTS: Record<string, Record<string, string>> = {
     'motion.spatial-split-hint': 'The spatial curves overshoot (about 9% for the fast one, 1.4% for the default); the effects curve does not. Turning this off uses the effects curve everywhere.',
     'motion.quantize': 'Snap durations to the Material ladder',
     'motion.quantize-hint': 'Pull rewritten durations onto 50/100/150/200/250/300/350/400/450/500/550/600/700/800/900/1000 ms.',
+    'motion.stream': 'Progressive streamed text',
+    'motion.stream-hint': 'Reveal the transcript and the reasoning summary progressively instead of letting each chunk jump into place. The reveal moves a mask line rather than truncating text, so every character is in the DOM from the moment it arrives and selection, copying, and screen readers are unaffected. The speed follows the backlog: a burst catches up quickly, a trickle crawls.',
     'motion.scroll': 'Scroll on the same curve',
     'motion.scroll-hint': 'Take over smooth scrolling — locating a trajectory row, centring a plugin card, jumping to a session-inspector node, following streamed output — and drive it on this page\'s curve; a repeat request on the same container re-aims the run in flight instead of starting over. Scripted scrolling ends once per frame, so this layer withholds those events and releases exactly one when the run lands or is cancelled; consumers that settle on \'scrolling stopped\' see the native rhythm. A wheel, touch, or scroll key over the container stops it at once.',
     'motion.reduced': 'Always reduce motion',
@@ -341,6 +348,8 @@ function registerClient(): void {
         const motion = createMotion()
         /** The scripted-scroll layer; it replaces smooth scrolling and its end events. */
         const scrolling = createScrollMotion()
+        /** The streaming layer; it reveals transcript and reasoning text progressively. */
+        const streaming = createStreamMotion()
         /**
          * Replace the rendered state and notify every mounted row.
          * @param patch - fields to change.
@@ -376,6 +385,7 @@ function registerClient(): void {
           if (disposed) return
           motion.apply(next)
           scrolling.apply(next)
+          streaming.apply(next)
         }
 
         /**
@@ -392,6 +402,7 @@ function registerClient(): void {
           || left.quantize !== right.quantize
           || left.reduced !== right.reduced
           || left.scroll !== right.scroll
+          || left.stream !== right.stream
 
         /** Drop the palette override layer, if one is mounted. */
         const clearOverride = (): void => {
@@ -932,6 +943,9 @@ function registerClient(): void {
               checkbox(current.quantize,
                 next => { void saveMotion({ quantize: next }) },
                 tr('motion.quantize'), tr('motion.quantize-hint'), locked),
+              checkbox(current.stream,
+                next => { void saveMotion({ stream: next }) },
+                tr('motion.stream'), tr('motion.stream-hint'), locked),
               checkbox(current.scroll,
                 next => { void saveMotion({ scroll: next }) },
                 tr('motion.scroll'), tr('motion.scroll-hint'), locked),
@@ -991,6 +1005,7 @@ function registerClient(): void {
             // unmount even though the palette switch never gated them.
             motion.restore()
             scrolling.restore()
+            streaming.restore()
           }
         }, 'ui-experience: page-level layers')
         void poll()

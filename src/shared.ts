@@ -62,6 +62,8 @@ export interface MotionSettings {
   /** Whether scripted smooth scrolling replaces the native one, and its end
    *  events are shadowed so consumers see one end per gesture. */
   scroll: boolean
+  /** Whether streamed transcript and reasoning text reveals progressively. */
+  stream: boolean
 }
 
 /** A motion layer that already did nothing; the client compares against it. */
@@ -72,6 +74,7 @@ export const MOTION_OFF: MotionSettings = {
   quantize: false,
   reduced: 'system',
   scroll: false,
+  stream: true,
 }
 
 /** Arguments of the poll endpoint: the caller's last seen palette version. */
@@ -139,6 +142,7 @@ export interface SetMotionArgs {
   quantize?: boolean
   reduced?: MotionReduced
   scroll?: boolean
+  stream?: boolean
 }
 
 /** Result of the setMotion endpoint: the settings now in effect. */
