@@ -118,28 +118,6 @@ token 的值按原样写入 CSS 变量，因此 `color-mix(...)` 这类表达式
 - 配色检测周期为 2 秒，文件变化最多延迟约 2 秒生效。
 - 关闭开关后启动底色叠加立即撤销（由作用域属性控制）；注入的样式与脚本元素保留到下次刷新，但不产生视觉效果。
 
-## 样式基线
-
-设置行的控件样式来自宿主既有实现，而不是外部包依赖。原因有两条，都不是偏好问题：
-
-1. **DSH 明确禁止**：「不要 `require('@deepseek-ai/dsh-client-ui-primitives')` 或把任何 Harness Client 包当模块加载……这些包会无通知地变更，且抛错的组件会让整个 slot entry 变空白。请自行实现控件：从原语的 `src/*.tsx` 与 `*.module.css` 复制标记、样式与行为。」（`dsh-doc` 技能 `references/practices.md`）
-2. **技术上也不成立**：这些包不在 `dsh` 的 `node_modules` 里，官方包自己也只把原语写在 `devDependencies`。第三方插件能 `require` 到它，全靠 Web 外壳硬编码的模块表。一旦上游改名、拆包或移除条目，`require` 直接抛错——因为异常发生在 slot 组件内部，整行设置会消失，而不是样式退化。
-
-两种失效的性质不同：**复制样式**最坏是某次改版后尺寸或配色略有偏差，功能完好；**依赖内部包**则是整行消失。所以这里选择复制，并把漂移控制在可核查的范围内。
-
-当前基线为 **DSH 0.2.2-rc.2**，全部规则集中在 [`src/styles.ts`](src/styles.ts)，每条规则上方标注了对应的宿主源文件与选择器：
-
-| 本插件类 | 对应宿主来源 |
-| --- | --- |
-| `.dsh-uix-row` | `AppearanceRow.module.css` `.group` |
-| `.dsh-uix-title` / `.dsh-uix-desc` | `FontSizeRow.module.css` `.title` / `.desc` |
-| `.dsh-uix-field` / `-label` / `-input` | `ConfigField.module.css` `.field` / `.head label` / `.field input` |
-| `.dsh-uix-save` | 配置表单的保存按钮 |
-| `.dsh-uix-reset` | `Button.module.css` `.outline` |
-| `.dsh-uix-switch` / `-thumb` | `Switch.module.css` `.switch` / `.thumb` |
-
-所有颜色、圆角、焦点环都用 `--dsw-*` 主题 token，这些是跨版本稳定的公开契约；只有长度值（内距、尺寸、字号）可能随改版调整。升级 DSH 后，把上表的源文件与 `src/styles.ts` 对照一遍即可。
-
 ## 开发
 
 ```bash

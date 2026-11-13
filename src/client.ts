@@ -11,10 +11,9 @@
 
 import {
   BOOT_ATTRIBUTE, DEFAULT_COLORS_PATH, DEFAULT_TOKENS_PATH, REMOTE_SERVICE,
-  type PalettePaths, type PollArgs, type PollResult, type ReportArgs, type SetActiveArgs, type SetActiveResult,
+  type PalettePaths, type PollArgs, type PollResult, type SetActiveArgs, type SetActiveResult,
   type SetPathsArgs, type SetPathsResult, type ThemeTokenModes,
 } from './shared.ts'
-import { ROW_CSS } from './styles.ts'
 
 /** Minimal React face the bundle uses (the real React arrives from the loader). */
 interface ReactLike {
@@ -48,7 +47,6 @@ interface UiExperienceRemoteNamespace {
   poll(args: PollArgs): Promise<PollResult>
   setActive(args: SetActiveArgs): Promise<SetActiveResult>
   setPaths(args: SetPathsArgs): Promise<SetPathsResult>
-  report(args: ReportArgs): Promise<{ recorded: boolean }>
 }
 
 /** Theme registry subset this bundle consumes. */
@@ -78,8 +76,6 @@ interface ClientContext {
 }
 
 declare const console: { error(...values: unknown[]): void }
-
-declare const getComputedStyle: (element: unknown) => { getPropertyValue(name: string): string }
 
 declare const document: {
   head: { appendChild(node: unknown): unknown }
@@ -147,7 +143,7 @@ function uiExperienceRemoteContribution(zod: ZodLike): { package: string; descri
     typeSymbol: `${SOURCE}/shared#${name}`,
     create: schema,
   })
-  const descriptor = (method: 'poll' | 'setActive' | 'setPaths' | 'report', shape: () => Record<string, unknown>, typeName: string): RemoteDescriptor => ({
+  const descriptor = (method: 'poll' | 'setActive' | 'setPaths', shape: () => Record<string, unknown>, typeName: string): RemoteDescriptor => ({
     id: `${SOURCE}#${REMOTE_SERVICE}/${method}`,
     service: REMOTE_SERVICE,
     namespace: REMOTE_SERVICE,
@@ -168,7 +164,6 @@ function uiExperienceRemoteContribution(zod: ZodLike): { package: string; descri
       descriptor('poll', () => ({ known: zod.string().optional() }), 'PollArgs'),
       descriptor('setActive', () => ({ active: zod.boolean().optional() }), 'SetActiveArgs'),
       descriptor('setPaths', () => ({ colorsPath: zod.string().optional(), tokensPath: zod.string().optional() }), 'SetPathsArgs'),
-      descriptor('report', () => ({}), 'ReportArgs'),
     ],
   }
 }
@@ -202,6 +197,45 @@ const DICTS: Record<string, Record<string, string>> = {
   },
 }
 
+/**
+ * Row styles. The switch, input, and buttons mirror the host controls of the
+ * same kind: sizes, radii, and states are copied from the host's compiled
+ * `Switch` and text-field rules, and every value is a theme token so the row
+ * follows both the built-in palettes and the matugen overlay. Classes carry the
+ * plugin prefix and nothing here depends on a host package.
+ */
+const CSS = `
+.dsh-uix-row{display:block;padding:16px 0;border-bottom:0.5px solid var(--dsw-alias-border-l2)}
+.dsh-uix-head{display:flex;align-items:center;justify-content:space-between;gap:24px}
+.dsh-uix-text{min-width:0}
+.dsh-uix-title{font-size:14px;line-height:22px}
+.dsh-uix-desc{margin-top:4px;color:var(--dsw-alias-label-secondary);font-size:12px;line-height:18px}
+.dsh-uix-error{margin-top:6px;font-size:12px;line-height:18px;color:var(--dsw-alias-state-error-primary)}
+.dsh-uix-notice{margin-top:6px;font-size:12px;line-height:18px;color:var(--dsw-alias-state-success-primary)}
+.dsh-uix-disclosure{margin-top:8px;padding:0;border:0;background:none;color:var(--dsw-alias-label-secondary);font-size:12px;line-height:18px;cursor:pointer}
+.dsh-uix-disclosure:hover{color:var(--dsw-alias-label-primary)}
+.dsh-uix-disclosure:focus-visible{outline:var(--dsw-focus-ring-width) solid var(--dsw-alias-state-business-primary);outline-offset:2px;border-radius:4px}
+.dsh-uix-paths{margin-top:10px;display:flex;flex-direction:column;gap:10px;padding:12px;border-radius:8px;background:var(--dsw-alias-bg-layer-1)}
+.dsh-uix-field{display:flex;flex-direction:column;gap:4px}
+.dsh-uix-label{font-size:12px;line-height:18px;color:var(--dsw-alias-label-secondary)}
+.dsh-uix-input{box-sizing:border-box;width:100%;height:32px;padding:0 10px;border-radius:6px;border:1px solid var(--dsw-alias-border-l2);background:var(--dsw-specific-input-major);color:var(--dsw-alias-label-primary);font-family:var(--dsw-font-family,monospace);font-size:12px;outline:none}
+.dsh-uix-input:focus-visible{border-color:var(--dsw-alias-brand-primary);outline:var(--dsw-focus-ring-width) solid var(--dsw-alias-state-business-primary);outline-offset:1px}
+.dsh-uix-actions{display:flex;gap:8px}
+.dsh-uix-button{height:28px;padding:0 12px;border-radius:6px;border:1px solid var(--dsw-alias-border-l2);background:transparent;color:var(--dsw-alias-label-primary);font-family:inherit;font-size:12px;cursor:pointer}
+.dsh-uix-button:hover:enabled{background:var(--dsw-alias-interactive-bg-hover)}
+.dsh-uix-button:focus-visible{outline:var(--dsw-focus-ring-width) solid var(--dsw-alias-state-business-primary);outline-offset:2px}
+.dsh-uix-button-primary{border-color:transparent;background:var(--dsw-alias-button-primary-fill);color:var(--dsw-alias-label-on-color)}
+.dsh-uix-button:disabled{opacity:.5;cursor:default}
+.dsh-uix-hint{font-size:12px;line-height:18px;color:var(--dsw-alias-label-tertiary)}
+.dsh-uix-switch{box-sizing:border-box;position:relative;flex:0 0 auto;width:36px;height:20px;padding:2px;border:0;border-radius:999px;background:var(--dsw-alias-border-l3);cursor:pointer}
+.dsh-uix-switch[aria-checked=true]{background:var(--dsw-alias-brand-primary)}
+.dsh-uix-switch:disabled{cursor:default;opacity:.5}
+.dsh-uix-switch:focus-visible{outline:var(--dsw-focus-ring-width) solid var(--dsw-alias-state-business-primary);outline-offset:2px}
+.dsh-uix-switch-thumb{display:block;width:16px;height:16px;border-radius:50%;background:var(--dsw-alias-label-primary-foreground);transition:transform .12s ease}
+.dsh-uix-switch[aria-checked=false] .dsh-uix-switch-thumb{background:var(--dsw-alias-switch-thumb)}
+.dsh-uix-switch[aria-checked=true] .dsh-uix-switch-thumb{transform:translate(16px)}
+`
+
 function registerClient(): void {
   window.__ModuleLoader__.load({
     id: SOURCE,
@@ -213,21 +247,16 @@ function registerClient(): void {
       /**
        * Bundle body, mounted inside the injected Remote scope so every
        * registration and listener shares the namespace's lifetime.
-       *
-       * The theme service is resolved on every use rather than captured once:
-       * the registry object is re-created when the theme package reloads (HMR,
-       * upgrade), and a captured reference would keep stacking layers onto a
-       * dead runtime. The page would silently fall back to the built-in palette
-       * while this bundle still believed its palette was mounted.
+       * @param registry - the theme registry the override layer is stacked on.
        * @param ctx - the bundle's restricted client context.
        * @param gateway - the currently running instance of our own service.
        */
-      function run(ctx: ClientContext, gateway: UiExperienceRemoteNamespace): void {
+      function run(registry: ThemeLike, ctx: ClientContext, gateway: UiExperienceRemoteNamespace): void {
         const t = ctx.locale.bind('ui-experience')
         ctx.effect(() => ctx.locale.register('ui-experience', DICTS), 'ui-experience: dictionaries')
         ctx.effect(() => {
           const sheet = document.createElement('style')
-          sheet.textContent = ROW_CSS
+          sheet.textContent = CSS
           document.head.appendChild(sheet)
           return () => { sheet.remove() }
         }, 'ui-experience: row styles')
@@ -252,24 +281,6 @@ function registerClient(): void {
         let paintedWidth = ''
         let disposeOverride: (() => void) | undefined
         let borderSheet: { textContent: string; remove(): void } | undefined
-        /** DIAGNOSTIC: override attempts and the last error, reported to the Host. */
-        let attempts = 0
-        let lastOverrideError: string | undefined
-        let reported = false
-
-        /** Registry the current override layer was stacked on, and its version. */
-        let mountedOn: ThemeLike | undefined
-        let mountedVersion: string | undefined
-        /** Set while a token refetch triggered by a stale mount is in flight. */
-        let remounting = false
-
-        /**
-         * The live theme service. Falls back to the last known instance only
-         * while the service is briefly unavailable during a reload.
-         * @returns the registry to stack overrides on.
-         */
-        const registryNow = (): ThemeLike | undefined =>
-          (ctx.get('theme') as ThemeLike | undefined) ?? mountedOn
 
         let view: ViewState = {
           active: false,
@@ -308,8 +319,6 @@ function registerClient(): void {
         const clearOverride = (): void => {
           disposeOverride?.()
           disposeOverride = undefined
-          mountedOn = undefined
-          mountedVersion = undefined
         }
 
         /**
@@ -318,93 +327,17 @@ function registerClient(): void {
          * choice keeps working underneath it.
          * @param modes - validated token modes.
          */
-        const applyPalette = (modes: ThemeTokenModes, version: string): void => {
+        const applyPalette = (modes: ThemeTokenModes): void => {
           if (disposed) return
-          const registry = registryNow()
-          if (registry === undefined) {
-            publish({ problem: 'theme service is unavailable; palette not applied' })
-            return
-          }
           clearOverride()
-          attempts += 1
           try {
             disposeOverride = registry.overrideTokens(SOURCE, toOverrides(modes))
-            mountedOn = registry
-            mountedVersion = version
-            lastOverrideError = undefined
           } catch (error) {
-            mountedOn = undefined
-            mountedVersion = undefined
-            lastOverrideError = (error as Error).message
             const message = `theme override rejected: ${(error as Error).message}`
             console.error(`ui-experience: ${message}`)
             publish({ problem: message })
           }
         }
-
-        /**
-         * Whether the palette should be stacked but is not, or is stacked on a
-         * stale registry. This is the self-healing check for a theme reload.
-         * @param version - palette version the host currently reports.
-         * @returns whether a full refetch is needed.
-         */
-        const needsRemount = (version: string): boolean =>
-          remounting === false
-          && (disposeOverride === undefined
-            || mountedOn !== registryNow()
-            || mountedVersion !== version)
-
-        /**
-         * Refetch the palette with an unknown version so the Host returns the
-         * tokens, then stack them on the live registry.
-         */
-        const remount = async (): Promise<void> => {
-          if (disposed || remounting) return
-          remounting = true
-          try {
-            const answer = unwrap<PollResult>(await gateway.poll({}))
-            if (disposed || answer.status !== 'ok' || answer.tokens === undefined) return
-            known = answer.version
-            applyPalette(answer.tokens, answer.version)
-            applyBorder(answer.borderWidth)
-          } catch (error) {
-            const message = (error as Error).message
-            if (message !== lastRpcProblem) {
-              lastRpcProblem = message
-              console.error(`ui-experience: palette refetch failed: ${message}`)
-            }
-          } finally {
-            remounting = false
-          }
-        }
-
-
-        /**
-         * DIAGNOSTIC: send the page's computed token values to the Host log so a
-         * failed override can be told apart from one that never ran.
-         */
-        const reportOnce = async (): Promise<void> => {
-          if (reported) return
-          reported = true
-          const body = (document as unknown as { body?: unknown }).body
-          const computed = body === undefined ? undefined : getComputedStyle(body)
-          const read = (name: string): string => computed?.getPropertyValue(name).trim() ?? 'n/a'
-          const live = ctx.get('theme') as ThemeLike | undefined
-          try {
-            await gateway.report({
-              attempts,
-              applied: disposeOverride !== undefined,
-              error: lastOverrideError,
-              hasMethod: typeof live?.overrideTokens === 'function',
-              buttonInfoFill: read('--dsw-alias-button-info-fill'),
-              bgBase: read('--dsw-alias-bg-base'),
-              switchThumb: read('--dsw-alias-switch-thumb'),
-            })
-          } catch (error) {
-            console.error(`ui-experience: diagnostic report failed: ${(error as Error).message}`)
-          }
-        }
-
 
         /**
          * Paint the border-width sheet, replacing the previous one. An invalid
@@ -484,7 +417,7 @@ function registerClient(): void {
             publish({ active: answer.active })
             if (answer.active) {
               setBootAttribute(true)
-              if (answer.status === 'ok' && answer.tokens !== undefined) applyPalette(answer.tokens, answer.version)
+              if (answer.status === 'ok' && answer.tokens !== undefined) applyPalette(answer.tokens)
               applyBorder(answer.borderWidth)
             } else {
               teardown()
@@ -504,11 +437,7 @@ function registerClient(): void {
           }
           if (answer.changed) {
             known = answer.version
-            if (view.active && answer.tokens !== undefined) applyPalette(answer.tokens, answer.version)
-          } else if (view.active && needsRemount(answer.version)) {
-            // The palette is on but not (or no longer) stacked on the live
-            // registry: fetch the tokens again instead of trusting `known`.
-            void remount()
+            if (view.active && answer.tokens !== undefined) applyPalette(answer.tokens)
           }
           if (view.active) applyBorder(answer.borderWidth)
         }
@@ -539,7 +468,6 @@ function registerClient(): void {
           if (disposed) return
           lastRpcProblem = ''
           adopt(answer)
-          void reportOnce()
         }
 
         /**
@@ -574,7 +502,7 @@ function registerClient(): void {
             bootstrapped = true
             setBootAttribute(true)
             publish({ active: true, paths: answer.paths, notice: t('palette.saved') })
-            applyPalette(tokens, answer.version)
+            applyPalette(tokens)
             applyBorder(answer.borderWidth)
           } catch (error) {
             const message = (error as Error).message
@@ -606,7 +534,7 @@ function registerClient(): void {
               notice: probe.status === 'ok' ? t('palette.saved') : '',
               problem: probe.status === 'ok' ? '' : probe.message,
             })
-            if (probe.status === 'ok' && view.active && probe.tokens !== undefined) applyPalette(probe.tokens, probe.version)
+            if (probe.status === 'ok' && view.active && probe.tokens !== undefined) applyPalette(probe.tokens)
           } catch (error) {
             const message = (error as Error).message
             console.error(`ui-experience: failed to save the palette paths: ${message}`)
@@ -640,14 +568,12 @@ function registerClient(): void {
           }, [state.paths])
 
           const status = state.problem !== ''
-            ? h('p', { className: 'dsh-uix-problem', role: 'alert' }, state.problem)
+            ? h('div', { className: 'dsh-uix-error', role: 'alert' }, state.problem)
             : state.notice !== ''
-              ? h('p', { className: 'dsh-uix-notice' }, state.notice)
+              ? h('div', { className: 'dsh-uix-notice' }, state.notice)
               : null
 
-          const field = (
-            label: string, value: string, placeholder: string, set: (next: string) => void, hint?: unknown,
-          ): unknown =>
+          const field = (label: string, value: string, placeholder: string, set: (next: string) => void): unknown =>
             h('label', { className: 'dsh-uix-field' },
               h('span', { className: 'dsh-uix-label' }, label),
               h('input', {
@@ -658,28 +584,27 @@ function registerClient(): void {
                 spellCheck: false,
                 onChange: (event: { target: { value: string } }) => { set(event.target.value) },
               }),
-              hint ?? null,
             )
 
           const editor = open
-            ? h('div', { className: 'dsh-uix-form' },
+            ? h('div', { className: 'dsh-uix-paths' },
               field(tr('palette.colors-path'), colors, DEFAULT_COLORS_PATH, setColors),
-              field(tr('palette.tokens-path'), tokens, DEFAULT_TOKENS_PATH, setTokens,
-                h('p', { className: 'dsh-uix-hint' }, tr('palette.paths-hint'))),
-              h('div', { className: 'dsh-uix-footer' },
+              field(tr('palette.tokens-path'), tokens, DEFAULT_TOKENS_PATH, setTokens),
+              h('div', { className: 'dsh-uix-actions' },
                 h('button', {
                   type: 'button',
-                  className: 'dsh-uix-save',
+                  className: 'dsh-uix-button dsh-uix-button-primary',
                   disabled: state.saving,
                   onClick: () => { void savePaths(colors.trim(), tokens.trim()) },
                 }, tr('palette.save')),
                 h('button', {
                   type: 'button',
-                  className: 'dsh-uix-reset',
+                  className: 'dsh-uix-button',
                   disabled: state.saving,
                   onClick: () => { void savePaths(DEFAULT_COLORS_PATH, DEFAULT_TOKENS_PATH) },
                 }, tr('palette.reset')),
               ),
+              h('div', { className: 'dsh-uix-hint' }, tr('palette.paths-hint')),
             )
             : null
 
@@ -749,7 +674,7 @@ function registerClient(): void {
             console.error('ui-experience: the remote namespace was not installed after mounting the contribution')
             return
           }
-          run(ctx, gateway)
+          run(theme, ctx, gateway)
         },
       }
     },
