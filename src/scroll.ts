@@ -357,28 +357,6 @@ export function createScrollMotion(): {
    */
   const END_GRACE_MS = 400
 
-  /** Slack for deciding a container was sitting at its floor before a write. */
-  const FOLLOW_PIN_TOLERANCE = 4
-
-  /**
-   * Growth below this is one or two lines arriving mid-stream, which is written
-   * straight through.
-   *
-   * The transcript already animates that arrival — the mask reveal makes the text
-   * appear progressively — so gliding the scrollport for the same few pixels adds a
-   * second motion on top of the first. During continuous output the glides would
-   * also chain end to end, leaving the viewport in permanent motion. Only a
-   * discrete block that lands in one go, a tool result or a whole paragraph, is
-   * worth easing into view.
-   */
-  const FOLLOW_GLIDE_MIN_PX = 48
-
-  /** Longest a single follow glide may take. */
-  const FOLLOW_MAX_MS = 260
-
-  /** Floor each container was last seen at, so "was pinned" can be answered. */
-  const lastFloor = new WeakMap<ElementLike, number>()
-
   /**
    * Containers currently inside that grace window. A `WeakMap` cannot be walked,
    * and a reader who starts scrolling right after a run lands must not have their
@@ -576,89 +554,6 @@ export function createScrollMotion(): {
     const active = settings as MotionSettings
     if (active.reduced === 'always') return true
     return active.reduced === 'system' && window.matchMedia('(prefers-reduced-motion: reduce)').matches
-  }
-
-  /** One container's in-flight follow glide. */
-  const followGlides = new Map<ElementLike, { frame: number; from: number; to: number; started: number; duration: number }>()
-
-  /**
-   * Whether a write to `scrollTop` is the streaming tail being followed.
-   *
-   * The transcript follows by assigning the floor on every content change, so the
-   * pattern is specific: the value is the container's maximum, and the container
-   * was already sitting within a few lines of it. A jump from further away is a
-   * deliberate move and is left alone.
-   *
-   * @param element - the container.
-   * @param value - the value being written.
-   * @returns whether to glide to it instead of jumping.
-   */
-  function isFollowWrite(element: ElementLike, value: number): boolean {
-    const active = settings
-    if (active === undefined) return false
-    if (wantsInstant()) return false
-    const max = maxima(element)
-    if (max.top <= 0) return false
-    // Must land on the floor, which is what the follow loop writes.
-    if (Math.abs(value - max.top) > 1) return false
-    // Was the container sitting at its floor before this content arrived? Recorded
-    // floor to floor, because by the time the write happens the floor has already
-    // moved by however much was inserted.
-    const known = lastFloor.get(element)
-    const wasPinned = known === undefined
-      ? element.scrollTop >= max.top - FOLLOW_PIN_TOLERANCE
-      : element.scrollTop >= known - FOLLOW_PIN_TOLERANCE
-    lastFloor.set(element, max.top)
-    if (!wasPinned) return false
-    // A discrete block is worth easing; continuous one-line growth is not.
-    return Math.abs(value - element.scrollTop) >= FOLLOW_GLIDE_MIN_PX
-  }
-
-  /**
-   * Glide a container to its new floor over one frame chain.
-   * @param element - the container.
-   * @param to - the value the caller wrote.
-   */
-  function startFollow(element: ElementLike, to: number): void {
-    const active = settings as MotionSettings
-    const existing = followGlides.get(element)
-    if (existing !== undefined) window.cancelAnimationFrame(existing.frame)
-    else hold(element)
-    const from = element.scrollTop
-    const glide = {
-      frame: 0,
-      from,
-      to,
-      started: performance.now(),
-      // Short: the tail moves one line at a time, and a long glide would still be
-      // running when the next line arrives.
-      duration: Math.min(FOLLOW_MAX_MS, scrollDurationMs(Math.abs(to - from) * 4, active)),
-    }
-    followGlides.set(element, glide)
-    const step = (now: number): void => {
-      const current = followGlides.get(element)
-      if (current !== glide) return
-      const progress = Math.min(1, (now - glide.started) / glide.duration)
-      const eased = easeCurve(effectCurvePoints(active.mode), progress)
-      writeAxis(element, 'top', glide.from + (glide.to - glide.from) * eased)
-      if (progress >= 1) {
-        followGlides.delete(element)
-        writeAxis(element, 'top', glide.to)
-        release(element, true)
-        return
-      }
-      glide.frame = window.requestAnimationFrame(step)
-    }
-    glide.frame = window.requestAnimationFrame(step)
-  }
-
-  /** Stop every follow glide, leaving the viewports where they are. */
-  function stopFollows(): void {
-    for (const [element, glide] of followGlides) {
-      window.cancelAnimationFrame(glide.frame)
-      release(element, true)
-    }
-    followGlides.clear()
   }
 
   /** Stop the wheel run without landing, leaving the viewport where it is. */
@@ -1048,13 +943,6 @@ export function createScrollMotion(): {
    */
   function cancelIfOwned(target: EventTarget | null): boolean {
     const active = run
-    for (const [element, glide] of followGlides) {
-      if (target !== null && element.contains(target)) {
-        window.cancelAnimationFrame(glide.frame)
-        followGlides.delete(element)
-        release(element, true)
-      }
-    }
     if (active === undefined || target === null) return false
     if (!active.legs.some(leg => leg.element.contains(target))) return false
     cancel()
@@ -1111,23 +999,6 @@ export function createScrollMotion(): {
     prototype.scrollTo = scrollTo
     prototype.scrollBy = scrollBy
     prototype.scrollIntoView = scrollIntoView
-    // The transcript follows with `scrollTop = floor`, not with a method call, so
-    // that one write is the only way to reach the streaming tail. The setter below
-    // glides it; everything else passes straight through to the real accessor.
-    if (topAxis !== undefined) {
-      Object.defineProperty(Element.prototype, 'scrollTop', {
-        configurable: true,
-        enumerable: topAxis.enumerable,
-        get: topAxis.get,
-        set(this: ElementLike, value: number) {
-          if (writing > 0 || !isFollowWrite(this, value)) {
-            topAxis.set.call(this, value)
-            return
-          }
-          startFollow(this, value)
-        },
-      })
-    }
     // Capture on the window reaches the scroller before any listener the consumer
     // registered, whether it listens on the element or on the window.
     window.addEventListener('scrollend', onScrollEnd, true)
@@ -1152,19 +1023,10 @@ export function createScrollMotion(): {
         + 'leaving the current implementations in place instead of restoring stale ones')
       return
     }
-    stopFollows()
     const prototype = Element.prototype as unknown as Record<string, unknown>
     prototype.scrollTo = shipped.scrollTo
     prototype.scrollBy = shipped.scrollBy
     prototype.scrollIntoView = shipped.scrollIntoView
-    if (topAxis !== undefined) {
-      Object.defineProperty(Element.prototype, 'scrollTop', {
-        configurable: true,
-        enumerable: topAxis.enumerable,
-        get: topAxis.get,
-        set: topAxis.set,
-      })
-    }
     window.removeEventListener('scrollend', onScrollEnd, true)
     ;(window.removeEventListener as (kind: string, listener: unknown, capture: unknown) => void)(
       'wheel', onWheelBubble, false,

@@ -41,6 +41,25 @@ const STREAM_ATTRIBUTE = 'data-dsh-uix-stream'
 /** Remembers the text an element showed before its current update. */
 const LAST_ATTRIBUTE = 'data-dsh-uix-last'
 
+/** Marks a row this layer is unveiling after it was inserted. */
+const ENTER_ATTRIBUTE = 'data-dsh-uix-enter'
+
+/**
+ * Rows the transcript appends while it is following its tail.
+ *
+ * A row enters by fading and rising a couple of pixels. `transform` and `opacity`
+ * do not touch layout, which matters more than it looks: the transcript writes the
+ * scroll position and then reads it straight back to record where it landed
+ * (`use-chat-viewport.ts` `write`), so any entrance that changed height would make
+ * that read-back disagree with what was asked for, and the follow loop would decide
+ * it had been pushed off the bottom. Keeping the entrance to the compositor keeps
+ * the read-back exact.
+ */
+const ROW = '[data-chat-flow-kind], [data-chat-anchor-key], [data-submission-echo], [data-pending-steering]'
+
+/** How long a new row takes to settle in. */
+const ENTER_BASE_MS = 220
+
 /**
  * Elements that carry live text.
  *
@@ -158,9 +177,25 @@ const STREAM_CSS = `
   to { transform: translateY(-0.85lh); opacity: 0; }
 }
 
+/* A row that arrives while the transcript is following its tail rises into place.
+   Only opacity and transform are animated, so the height the follow loop reads back
+   right after its write is the height it asked for. */
+[${ENTER_ATTRIBUTE}] {
+  animation: dsh-uix-enter var(--dsh-uix-enter, 220ms) var(--dsh-uix-ease, ease) both;
+}
+
+@keyframes dsh-uix-enter {
+  from { opacity: 0; transform: translateY(-6px); }
+  to { opacity: 1; transform: none; }
+}
+
 @media (prefers-reduced-motion: reduce) {
   [${STREAM_ATTRIBUTE}="reveal"] {
     mask-image: none;
+  }
+
+  [${ENTER_ATTRIBUTE}] {
+    animation: none;
   }
 
   [${STREAM_ATTRIBUTE}="roll"][data-dsh-uix-rolling] > *,
@@ -223,6 +258,10 @@ export function createStreamMotion(): {
   restore(): void
 } {
   const reveals = new Map<ElementLike, Reveal>()
+  /** Rows this layer has already seen; anything absent from here is new. */
+  let knownRows = new WeakSet<ElementLike>()
+  /** Whether the transcript is currently pinned to its tail. */
+  let following = false
   let sheet: { textContent: string; remove(): void } | undefined
   let observer: { disconnect(): void; observe(target: unknown, options: Record<string, unknown>): void } | undefined
   let settings: MotionSettings | undefined
@@ -230,6 +269,7 @@ export function createStreamMotion(): {
   let installed = false
   let ease = ''
   let rollMs = ROLL_BASE_MS
+  let enterMs = ENTER_BASE_MS
 
   /** Whether the current policy asks for no motion at all. */
   function still(): boolean {
@@ -460,6 +500,7 @@ export function createStreamMotion(): {
         element.setAttribute(LAST_ATTRIBUTE, text)
       }
     }
+    unveil()
     // Anything still marked but no longer live has finished.
     const marked = document.querySelectorAll(`[${STREAM_ATTRIBUTE}]`)
     for (let index = 0; index < marked.length; index += 1) {
@@ -468,6 +509,43 @@ export function createStreamMotion(): {
       forget(element)
     }
     schedule()
+  }
+
+  /**
+   * Whether the transcript is following its tail right now.
+   *
+   * `ChatView` sets `data-chat-following-tail` on its root exactly while the reader
+   * is pinned, so the answer is the application's own rather than a guess from
+   * scroll geometry.
+   * @returns whether new rows should be unveiled.
+   */
+  function atTail(): boolean {
+    return document.querySelectorAll('[data-chat-following-tail]').length > 0
+  }
+
+  /**
+   * Unveil rows that were inserted since the last pass, while the transcript is
+   * following its tail.
+   *
+   * A row that arrives because the reader scrolled somewhere, or a row that
+   * replaces a collapsed block, is not a new arrival at the tail and must not move.
+   */
+  function unveil(): void {
+    const rows = document.querySelectorAll(ROW)
+    if (rows.length === 0) return
+    const pinned = atTail()
+    const next = new WeakSet<ElementLike>()
+    for (let index = 0; index < rows.length; index += 1) {
+      const row = rows[index]
+      if (row === undefined) continue
+      next.add(row)
+      if (knownRows.has(row)) continue
+      if (!pinned || !following) continue
+      row.setAttribute(ENTER_ATTRIBUTE, '')
+      window.setTimeout(() => { row.removeAttribute(ENTER_ATTRIBUTE) }, enterMs)
+    }
+    knownRows = next
+    following = pinned
   }
 
   /** Install the sheet and the observer. */
@@ -485,6 +563,13 @@ export function createStreamMotion(): {
       attributes: true,
       attributeFilter: ['data-streaming', 'data-shimmer'],
     })
+    // Seed: whatever is already on screen is not new.
+    const existing = document.querySelectorAll(ROW)
+    for (let index = 0; index < existing.length; index += 1) {
+      const row = existing[index]
+      if (row !== undefined) knownRows.add(row)
+    }
+    following = atTail()
     mark()
   }
 
@@ -497,6 +582,11 @@ export function createStreamMotion(): {
     installed = false
     document.documentElement.style.removeProperty('--dsh-uix-ease')
     document.documentElement.style.removeProperty('--dsh-uix-roll')
+    document.documentElement.style.removeProperty('--dsh-uix-enter')
+    const entering = document.querySelectorAll(`[${ENTER_ATTRIBUTE}]`)
+    for (let index = 0; index < entering.length; index += 1) {
+      entering[index]?.removeAttribute(ENTER_ATTRIBUTE)
+    }
     const marked = document.querySelectorAll(`[${STREAM_ATTRIBUTE}]`)
     for (let index = 0; index < marked.length; index += 1) {
       const element = marked[index]
@@ -519,6 +609,9 @@ export function createStreamMotion(): {
       rollMs = next.quantize ? quantizeMs(scaled) : scaled
       document.documentElement.style.setProperty('--dsh-uix-ease', ease)
       document.documentElement.style.setProperty('--dsh-uix-roll', `${rollMs}ms`)
+      const scaledEnter = ENTER_BASE_MS * next.durationScale
+      enterMs = next.quantize ? quantizeMs(scaledEnter) : scaledEnter
+      document.documentElement.style.setProperty('--dsh-uix-enter', `${enterMs}ms`)
       install()
     },
     restore: uninstall,
