@@ -95,14 +95,14 @@ interface Leg {
 
 /** The run currently in flight. */
 interface Run {
-  readonly legs: readonly Leg[]
-  readonly started: number
-  readonly duration: number
+  legs: Leg[]
+  started: number
+  duration: number
   /** The last position this run wrote per leg, to notice a foreign scroll. */
-  readonly written: Array<{ top: number; left: number }>
+  written: Array<{ top: number; left: number }>
   frame: number
-  /** Resolves the caller's promise and releases the shadowed ends. */
-  readonly done: () => void
+  /** Callers whose promise settles when this run ends, however it ends. */
+  readonly done: Array<() => void>
 }
 
 /** A minimal event face: the type, the target and, for keys, the key. */
@@ -134,14 +134,6 @@ const MOTION_EPSILON = 0.5
 
 /** Difference past which a position this layer did not write is a foreign scroll. */
 const FOREIGN_TOLERANCE = 1
-
-/**
- * Window in which a second smooth request on the same container is read as a
- * controller retargeting a moving target rather than a person asking to be taken
- * somewhere once. Measured follow loops retarget on every content change, which
- * during streaming is far inside this window.
- */
-const RETARGET_WINDOW = 300
 
 /** Keys that scroll the page, by `KeyboardEvent.key`. */
 const SCROLL_KEYS = new Set([
@@ -262,8 +254,6 @@ export function createScrollMotion(): {
    * the final position write.
    */
   const shadowed = new WeakMap<ElementLike, number>()
-  /** Last smooth request per container, for the retarget discriminator. */
-  const lastRequest = new WeakMap<ElementLike, number>()
   /** Set while this layer dispatches its own end, so it does not withhold it. */
   let dispatching = false
 
@@ -326,7 +316,7 @@ export function createScrollMotion(): {
     window.cancelAnimationFrame(active.frame)
     run = undefined
     for (const leg of active.legs) release(leg.element, notify)
-    active.done()
+    for (const settle of active.done) settle()
   }
 
   /**
@@ -371,17 +361,16 @@ export function createScrollMotion(): {
       // whole pixel, so the landing position can differ by less than one.
       run = undefined
       for (const leg of active.legs) release(leg.element, true)
-      active.done()
+      for (const settle of active.done) settle()
       return
     }
     active.frame = window.requestAnimationFrame(step)
   }
 
   /**
-   * Start one run, replacing any run in flight. Legs are captured from the
-   * current position, so a second request mid-flight retargets.
+   * Start one run, replacing any run in flight.
    * @param legs - the legs to animate.
-   * @param done - resolves the caller's promise when the run ends or is cancelled.
+   * @param done - settles the caller's promise when the run ends or is cancelled.
    */
   function start(legs: readonly Leg[], done: () => void): void {
     cancel()
@@ -390,13 +379,40 @@ export function createScrollMotion(): {
     const active = settings as MotionSettings
     for (const leg of legs) hold(leg.element)
     run = {
-      legs,
+      legs: [...legs],
       started: performance.now(),
       duration: scrollDurationMs(scrollDistance(legs), active),
       written: legs.map(leg => ({ top: leg.element.scrollTop, left: leg.element.scrollLeft })),
       frame: window.requestAnimationFrame(step),
-      done,
+      done: [done],
     }
+  }
+
+  /**
+   * Fold a new request into the run already moving this container, the way a
+   * native smooth scroll re-aims instead of starting over.
+   *
+   * Restarting would be wrong twice: the curve would begin again from zero on
+   * every retarget, and a caller that retargets on each content change — the
+   * streaming follow loop, or a virtualizer correcting a row it just measured —
+   * would never let a single run finish, so its consumer would never see an end.
+   *
+   * @param leg - the request's leg.
+   * @param done - settles this caller's promise with the run.
+   * @returns whether the request was folded in; false means the caller must start
+   * a fresh run.
+   */
+  function merge(leg: Leg, done: () => void): boolean {
+    const active = run
+    if (active === undefined || active.legs.length !== 1) return false
+    const current = active.legs[0]
+    if (current === undefined || current.element !== leg.element) return false
+    active.legs = [leg]
+    active.started = performance.now()
+    active.duration = scrollDurationMs(scrollDistance([leg]), settings as MotionSettings)
+    active.written = [{ top: leg.element.scrollTop, left: leg.element.scrollLeft }]
+    active.done.push(done)
+    return true
   }
 
   /** Whether the reduced-motion policy asks for instant travel. */
@@ -404,19 +420,6 @@ export function createScrollMotion(): {
     const active = settings as MotionSettings
     if (active.reduced === 'always') return true
     return active.reduced === 'system' && window.matchMedia('(prefers-reduced-motion: reduce)').matches
-  }
-
-  /**
-   * Whether a smooth request is a controller retargeting rather than a one-shot
-   * locate. Records the request either way.
-   * @param element - the container the request names.
-   * @returns whether the browser should take this one.
-   */
-  function isRetarget(element: ElementLike): boolean {
-    const now = performance.now()
-    const previous = lastRequest.get(element)
-    lastRequest.set(element, now)
-    return previous !== undefined && now - previous < RETARGET_WINDOW
   }
 
   /**
@@ -528,13 +531,6 @@ export function createScrollMotion(): {
     const active = settings
     if (active === undefined || behavior !== 'smooth') return shippedMethod.apply(element, args)
     if (wantsInstant()) return shippedMethod.apply(element, args)
-    // A controller chasing a moving floor owns this container: its run would be
-    // restarted every frame and its curve would never play.
-    if (isRetarget(element)) {
-      // Drop our run silently — the native scroll about to start raises its own end.
-      cancel(false)
-      return shippedMethod.apply(element, args)
-    }
     const base = relative
       ? { top: element.scrollTop, left: element.scrollLeft }
       : { top: 0, left: 0 }
@@ -542,7 +538,10 @@ export function createScrollMotion(): {
     const leg = legFor(element, request.top, request.left)
     // A request that changes nothing still resolves, like the native call.
     if (leg === undefined) return Promise.resolve()
-    return new Promise<void>(resolve => { start([leg], resolve) })
+    // One promise per caller, settled with whichever run finishes the travel.
+    return new Promise<void>(resolve => {
+      if (!merge(leg, resolve)) start([leg], resolve)
+    })
   }
 
   /** The patched `scrollTo`. */
