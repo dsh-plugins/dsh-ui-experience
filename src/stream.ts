@@ -1,6 +1,7 @@
 /**
  * Streaming output motion: the transcript reveals its text character by
- * character, and every live one-line label in the work steps rolls its previous
+ * character, and every live one-line label — a work-step title, the reasoning
+ * summary — sweeps an edge across the text that just arrived
  * line out when the text behind it changes.
  *
  * WHY THIS ONLY TOUCHES THE VISUAL LAYER
@@ -83,11 +84,11 @@ const LIVE = '[data-streaming], [data-process-activity] [data-shimmer]'
  * Reasons a live element is animated.
  *
  * - `reveal`: multi-line prose, uncovered by a descending mask line.
- * - `roll`: a one-line summary whose content is replaced wholesale.
- * - `append`: a one-line work-step label, which grows by appending. Only the added
- *   characters are revealed, so the text a reader has already read stays put.
+ * - `append`: a one-line label — a work-step title, or the reasoning summary. A
+ *   horizontal edge sits where the previous text ended and sweeps to the new width,
+ *   so only the characters that actually arrived are revealed.
  */
-type Mode = 'reveal' | 'roll' | 'append'
+type Mode = 'reveal' | 'append'
 
 /**
  * Reveal distance below which a new position is written without a transition.
@@ -128,13 +129,15 @@ const MAX_TILT_DEG = 30
 interface Reveal {
   /** Reveal position currently painted. */
   current: number
-  /** Where the boundary started for the run in flight. */
+  /** Where the boundary started for the leg in flight. */
   from: number
   /** Reveal position the element reaches with this chunk. */
   target: number
-  /** The run in flight, or 0. */
+  /** The leg in flight, or 0. */
   frame: number
+  /** When the leg in flight began. */
   started: number
+  /** How long the leg in flight runs, which is also its ceiling. */
   duration: number
 }
 
@@ -179,50 +182,18 @@ const STREAM_CSS = `
   mask-repeat: no-repeat;
 }
 
-/* A live one-line label does not reveal; its whole text is replaced at once, so the
-   change itself is what has to be animated. The outgoing copy rides a pseudo
-   element, which keeps it out of the layout and out of the accessibility tree. */
-[${STREAM_ATTRIBUTE}="roll"] {
-  position: relative;
-  overflow: hidden;
-}
+/* One-line labels: a horizontal edge at the end of the text a reader has already
+   seen sweeps out to the new width, so only the arriving characters are revealed.
 
-}
+   The edge is a registered custom property driven by a transition. Keyframing the
+   gradient itself does not work: Chrome snaps between two linear-gradients instead of
+   interpolating them, which reads as no animation at all.
 
-[${STREAM_ATTRIBUTE}="roll"]::after {
-  content: attr(data-dsh-uix-prev);
-  position: absolute;
-  inset: 0;
-  color: inherit;
-  white-space: nowrap;
-  pointer-events: none;
-  opacity: 0;
-}
-
-/* Duration and curve come from the configured family, set as custom properties on
-   the root when the layer applies; the literals here are only a fallback. */
-[${STREAM_ATTRIBUTE}="roll"][data-dsh-uix-rolling] > * {
-  animation: dsh-uix-roll-in var(--dsh-uix-roll, 260ms) var(--dsh-uix-ease, ease) both;
-}
-
-/* Appended label text: a horizontal edge sits where the previous text ended and
-   sweeps to the new width, so only the added characters arrive. The mask goes on
-   the FIRST child alone: TextShimmer renders its readable copy first and its
-   decorative sweep second, and masking that second copy is what made these labels
-   flicker.
-
-   Keyframing the gradient was tried and does not work: Chrome snaps between the two
-   linear-gradients instead of interpolating them, which is why the label appeared to
-   jump with no animation at all. The edge is a registered custom property instead,
-   and a transition on it drives the mask — the same mechanism the body reveal uses. */
-/* A step label arrives as a whole line and slides up into place. Only later growth
-   is appended, so the first appearance and every extension read differently: the row
-   moving in, then its text extending without the row moving again. */
-[${STREAM_ATTRIBUTE}="append"][data-dsh-uix-rolling] > :first-child {
-  animation: dsh-uix-roll-in var(--dsh-uix-roll, 260ms) var(--dsh-uix-ease, ease) both;
-}
-
-[${STREAM_ATTRIBUTE}="append"] > :first-child {
+   A TextShimmer root holds a decorative copy of its children for its own sweep, so
+   its mask goes on the readable first child. The reasoning summary masks itself,
+   which also replaces the static fade the application puts on it. */
+[${STREAM_ATTRIBUTE}="append"][data-shimmer] > :first-child,
+[${STREAM_ATTRIBUTE}="append"][data-streaming]:not([data-shimmer]) {
   --dsh-uix-edge: 100000px;
   mask-image: linear-gradient(
     to right,
@@ -231,18 +202,16 @@ const STREAM_CSS = `
   );
 }
 
-[${STREAM_ATTRIBUTE}="roll"][data-dsh-uix-rolling]::after {
-  animation: dsh-uix-roll-out var(--dsh-uix-roll, 260ms) var(--dsh-uix-ease, ease) both;
+/* A label arrives as a whole line and rises into place; only later growth is swept,
+   so arrival and extension read differently. */
+[${STREAM_ATTRIBUTE}="append"][data-shimmer][data-dsh-uix-rolling] > :first-child,
+[${STREAM_ATTRIBUTE}="append"][data-streaming]:not([data-shimmer])[data-dsh-uix-rolling] {
+  animation: dsh-uix-arrive var(--dsh-uix-roll, 260ms) var(--dsh-uix-ease, ease) both;
 }
 
-@keyframes dsh-uix-roll-in {
+@keyframes dsh-uix-arrive {
   from { transform: translateY(0.85lh); opacity: 0; }
   to { transform: translateY(0); opacity: 1; }
-}
-
-@keyframes dsh-uix-roll-out {
-  from { transform: translateY(0); opacity: 1; }
-  to { transform: translateY(-0.85lh); opacity: 0; }
 }
 
 /* A row that arrives while the transcript is following its tail rises into place.
@@ -266,13 +235,13 @@ const STREAM_CSS = `
     animation: none;
   }
 
-  [${STREAM_ATTRIBUTE}="roll"][data-dsh-uix-rolling] > *,
-  [${STREAM_ATTRIBUTE}="roll"][data-dsh-uix-rolling]::after,
-  [${STREAM_ATTRIBUTE}="append"][data-dsh-uix-rolling] > :first-child {
+  [${STREAM_ATTRIBUTE}="append"][data-shimmer][data-dsh-uix-rolling] > :first-child,
+  [${STREAM_ATTRIBUTE}="append"][data-streaming]:not([data-shimmer])[data-dsh-uix-rolling] {
     animation: none;
   }
 
-  [${STREAM_ATTRIBUTE}="append"] > :first-child {
+  [${STREAM_ATTRIBUTE}="append"][data-shimmer] > :first-child,
+  [${STREAM_ATTRIBUTE}="append"][data-streaming]:not([data-shimmer]) {
     mask-image: none;
   }
 }
@@ -307,6 +276,7 @@ interface ElementLike {
   readonly clientHeight: number
   readonly clientWidth: number
   readonly firstElementChild: ElementLike | null
+  getBoundingClientRect(): { left: number; right: number; width: number }
   readonly parentElement: ElementLike | null
   readonly style: {
     setProperty(name: string, value: string): void
@@ -322,8 +292,9 @@ declare const document: {
   createElement(tag: 'style'): { textContent: string; remove(): void }
   createRange(): {
     selectNodeContents(node: unknown): void
-    getBoundingClientRect(): { width: number }
+    getBoundingClientRect(): { width: number; right: number }
   }
+  createTreeWalker(node: unknown, whatToShow: number): { nextNode(): { textContent: string | null } | null }
   readonly head: { appendChild(node: unknown): unknown }
   readonly body: unknown
   readonly documentElement: { readonly style: { setProperty(name: string, value: string): void; removeProperty(name: string): string } }
@@ -360,6 +331,17 @@ export function createStreamMotion(): {
    * set, which made alternate updates animate differently from each other.
    */
   const generation = new WeakMap<ElementLike, number>()
+
+  /**
+   * Sweep currently in flight per label, as `{ until }` in performance time.
+   *
+   * A label that updates faster than its sweep can finish must not restart from the
+   * previous text each time: that pins the edge just after the old text and the new
+   * characters never arrive, which reads as a mask stuck over the text until the
+   * updates stop. While a sweep is live the edge is only ever moved forward, and the
+   * transition interpolates from wherever it currently is.
+   */
+  const sweeps = new WeakMap<ElementLike, number>()
 
   /**
    * Take the next generation for an element.
@@ -401,11 +383,11 @@ export function createStreamMotion(): {
    * equals its client height exactly like a one-line label's does.
    *
    * @param element - the live element.
-   * @returns whether it should roll instead of reveal.
+   * @returns the mode for this element.
    */
   function modeOf(element: ElementLike): Mode {
     if (element.hasAttribute('data-shimmer')) return 'append'
-    return window.getComputedStyle(element).whiteSpace === 'nowrap' ? 'roll' : 'reveal'
+    return window.getComputedStyle(element).whiteSpace === 'nowrap' ? 'append' : 'reveal'
   }
 
   /**
@@ -480,11 +462,22 @@ export function createStreamMotion(): {
    * @returns the readable text's width in pixels.
    */
   function contentWidth(element: ElementLike): number {
-    const content = firstChild(element)
-    if (content === null) return 0
+    const root = maskTarget(element)
+    if (root === null) return 0
+    // Measure the glyphs, not the box holding them. A nowrap label is a flex item
+    // that fills the row, so its box width says nothing about where its text ends —
+    // and returning that made a sweep run the full row for two words of text.
+    const origin = root.getBoundingClientRect().left
     const range = document.createRange()
-    range.selectNodeContents(content)
-    return range.getBoundingClientRect().width
+    const walker = document.createTreeWalker(root, 4)
+    let right = 0
+    for (let node = walker.nextNode(); node !== null; node = walker.nextNode()) {
+      const text = node.textContent ?? ''
+      if (text.trim() === '') continue
+      range.selectNodeContents(node)
+      right = Math.max(right, range.getBoundingClientRect().right - origin)
+    }
+    return right
   }
 
   /**
@@ -494,6 +487,21 @@ export function createStreamMotion(): {
    */
   function firstChild(element: ElementLike): ElementLike | null {
     return element.firstElementChild ?? null
+  }
+
+  /**
+   * The element that carries the mask for a one-line label.
+   *
+   * A `TextShimmer` root draws a decorative copy of its children for its own sweep,
+   * so the mask goes on its readable first child. Every other label — the reasoning
+   * summary — owns its mask directly, which also replaces the static fade the
+   * application puts there.
+   *
+   * @param element - the marked label.
+   * @returns the element to mask, or null.
+   */
+  function maskTarget(element: ElementLike): ElementLike | null {
+    return element.hasAttribute('data-shimmer') ? firstChild(element) : element
   }
 
   /**
@@ -526,31 +534,51 @@ export function createStreamMotion(): {
    */
   function append(element: ElementLike, previous: string, previousWidth: number): void {
     const now = labelText(element)
-    const content = firstChild(element)
-    if (content === null) return
+    const target = maskTarget(element)
+    if (target === null) return
     const full = contentWidth(element)
     element.setAttribute(WIDTH_ATTRIBUTE, String(full))
-    // A change that is not an extension has nothing to preserve; it is shown at once
-    // rather than rolled, because for a step label the roll reads as the row sliding.
-    if (previous === '' || !now.startsWith(previous) || previousWidth <= 0) return
-    if (full <= previousWidth + 1) return
+    if (full <= 1) {
+      // Nothing measurable to sweep, so the label is simply shown whole.
+      target.style.removeProperty('--dsh-uix-edge')
+      target.style.removeProperty('transition')
+      return
+    }
+    // Two different arrivals need two different sweeps.
+    //
+    // An extension keeps what the reader has already read and sweeps only the new
+    // characters in, from the old right edge.
+    //
+    // A replacement has nothing in common with what was there. It is a new line being
+    // written, so it sweeps from the left edge. Carrying the old edge over would draw
+    // the new line as if it were already partly read, which is why no unveiling
+    // appeared at all.
+    const extending = previous !== '' && now.startsWith(previous) && previousWidth > 0
+    const start = extending ? previousWidth : 0
+    const gap = Math.max(MIN_REVEAL_PX, full - start)
+    // Bounded by the same curve as the body reveal, so a longer arrival takes longer
+    // and a short one does not crawl — and every sweep is guaranteed to finish.
+    const duration = revealDuration(gap)
     const run = nextGeneration(element)
-    // One motion at a time: the arrival slide shares this element with the append
-    // sweep, and leaving its mark set would keep its animation applied for good.
     element.removeAttribute('data-dsh-uix-rolling')
-    // Park the edge at the previous width with transitions off, force a style flush,
-    // then let the transition carry it to the new width. Without the flush the browser
-    // would coalesce both assignments and the sweep would not run.
-    content.style.transition = 'none'
-    content.style.setProperty('--dsh-uix-edge', `${previousWidth}px`)
-    void element.scrollHeight
-    content.style.transition = `--dsh-uix-edge ${appendMs}ms ${ease}`
-    content.style.setProperty('--dsh-uix-edge', `${full}px`)
+    // Only an extension may continue from where the edge already is: it is the same
+    // line growing. A replacement always restarts, even mid-sweep, because the text
+    // it would otherwise continue into is gone.
+    const continuing = extending && (sweeps.get(element) ?? 0) > performance.now()
+    if (!continuing) {
+      target.style.transition = 'none'
+      target.style.setProperty('--dsh-uix-edge', `${start}px`)
+      void element.scrollHeight
+    }
+    sweeps.set(element, performance.now() + duration)
+    target.style.transition = `--dsh-uix-edge ${duration}ms ${ease}`
+    target.style.setProperty('--dsh-uix-edge', `${full}px`)
     window.setTimeout(() => {
       if (!owns(element, run)) return
-      content.style.setProperty('--dsh-uix-edge', '100000px')
-      content.style.removeProperty('transition')
-    }, appendMs)
+      sweeps.delete(element)
+      target.style.setProperty('--dsh-uix-edge', '100000px')
+      target.style.removeProperty('transition')
+    }, duration)
   }
 
   /**
@@ -600,16 +628,42 @@ export function createStreamMotion(): {
     const height = Number.isFinite(lineHeight) && lineHeight > 0 ? lineHeight : 24
     element.style.setProperty('--dsh-uix-tilt', tiltFor(element, height))
     state.target = terminal(element, height)
+    // A leg already in flight is left to finish on its own clock. It will see the new
+    // target and start the next leg when it lands.
+    //
+    // Restarting the leg here was wrong, and it is what made the boundary crawl. This
+    // runs on every mutation batch, and a running tool mutates the page continuously,
+    // so the leg restarted before progress could accumulate. With an ease-in curve the
+    // progress at each restart is close to zero, so the boundary effectively froze —
+    // and only completed once the tool stopped mutating and the leg was finally
+    // allowed to run to its end.
+    if (state.frame !== 0) return
+    run(element, state)
+  }
+
+  /**
+   * Start one leg of the reveal, from wherever the boundary is now to the current
+   * target.
+   *
+   * The leg is bounded by its own duration, so the boundary always lands: a leg is
+   * never left waiting on further content. When it lands and the target has moved
+   * on, the next leg starts from there, which is how a long stream stays continuous
+   * instead of being one unbounded run.
+   *
+   * @param element - the element being revealed.
+   * @param state - its reveal state.
+   */
+  function run(element: ElementLike, state: Reveal): void {
+    const active = settings
+    if (active === undefined) return
     const gap = state.target - state.current
     if (gap < MIN_REVEAL_PX) {
-      element.style.setProperty('--dsh-uix-reveal', `${state.target}px`)
-      state.current = state.target
+      state.frame = 0
       return
     }
     state.from = state.current
     state.started = performance.now()
     state.duration = revealDuration(gap)
-    if (state.frame !== 0) return
     const mode = active.mode
     const step = (now: number): void => {
       const live = reveals.get(element)
@@ -619,9 +673,11 @@ export function createStreamMotion(): {
       state.current = state.from + (state.target - state.from) * eased
       element.style.setProperty('--dsh-uix-reveal', `${state.current}px`)
       if (progress >= 1) {
-        state.frame = 0
         state.current = state.target
         element.style.setProperty('--dsh-uix-reveal', `${state.target}px`)
+        state.frame = 0
+        // Content that arrived during the leg moves the target; chase it now.
+        if (state.target - state.current >= MIN_REVEAL_PX) run(element, state)
         return
       }
       state.frame = window.requestAnimationFrame(step)
@@ -629,29 +685,6 @@ export function createStreamMotion(): {
     state.frame = window.requestAnimationFrame(step)
   }
 
-
-  /**
-   * Roll a live label: the line it showed before this update leaves upward while
-   * the new one arrives from below. Used when the text was replaced rather than
-   * extended, so there is no prefix worth preserving.
-   * @param element - the label.
-   * @param previous - the text it showed before this update.
-   */
-  function roll(element: ElementLike, previous: string): void {
-    const before = previous.replace(/\s+/g, ' ').trim()
-    const now = (element.textContent ?? '').replace(/\s+/g, ' ').trim()
-    if (before === '' || before === now) return
-    const run = nextGeneration(element)
-    // One animation at a time: the sweep and the roll share the element, and leaving
-    // the other one's mark in place makes both play at once.
-    element.setAttribute('data-dsh-uix-prev', before)
-    element.removeAttribute('data-dsh-uix-rolling')
-    void element.scrollHeight
-    element.setAttribute('data-dsh-uix-rolling', '')
-    window.setTimeout(() => {
-      retire(element, run, ['data-dsh-uix-rolling', 'data-dsh-uix-prev'])
-    }, rollMs)
-  }
 
   /**
    * Drop every mark this layer put on one element and hand it back untouched.
@@ -667,25 +700,25 @@ export function createStreamMotion(): {
   function forget(element: ElementLike, immediately = false): void {
     const state = reveals.get(element)
     reveals.delete(element)
+    // Open the mask before removing it. Dropping the attribute while the boundary was
+    // still mid-run snapped the last line to full colour in a single frame.
+    if (state !== undefined && !immediately) {
+      element.style.setProperty('--dsh-uix-reveal', `${state.target + element.scrollHeight}px`)
+    }
     element.removeAttribute(STREAM_ATTRIBUTE)
     element.removeAttribute(LAST_ATTRIBUTE)
     element.removeAttribute(WIDTH_ATTRIBUTE)
-    element.removeAttribute('data-dsh-uix-prev')
     element.removeAttribute('data-dsh-uix-rolling')
-    const content = firstChild(element)
+    const target = maskTarget(element)
     const clear = (): void => {
       element.style.removeProperty('--dsh-uix-reveal')
       element.style.removeProperty('--dsh-uix-tilt')
       element.style.removeProperty('transition')
-      content?.style.removeProperty('--dsh-uix-edge')
-      content?.style.removeProperty('transition')
+      target?.style.removeProperty('--dsh-uix-edge')
+      target?.style.removeProperty('transition')
     }
-    if (immediately || state === undefined) {
-      clear()
-      return
-    }
-    element.style.setProperty('--dsh-uix-reveal', `${state.target + element.scrollHeight}px`)
-    window.setTimeout(clear, revealMaxMs)
+    if (immediately || state === undefined) clear()
+    else window.setTimeout(clear, revealMaxMs)
   }
 
   /** Re-measure every live element that still exists. */
@@ -770,8 +803,7 @@ export function createStreamMotion(): {
       if (previous === text) continue
       const previousWidth = Number.parseFloat(element.getAttribute(WIDTH_ATTRIBUTE) ?? '0')
       element.setAttribute(LAST_ATTRIBUTE, text)
-      if (mode === 'roll') roll(element, previous)
-      else append(element, previous, Number.isFinite(previousWidth) ? previousWidth : 0)
+      append(element, previous, Number.isFinite(previousWidth) ? previousWidth : 0)
     }
     unveil()
     // Anything still marked but no longer live has finished.
