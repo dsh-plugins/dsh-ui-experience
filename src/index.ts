@@ -201,7 +201,11 @@ function mapColors(colors: MatugenColors): ThemeTokenTable {
     '--dsw-alias-state-warn-tertiary': colors.secondary_container!,
     '--dsw-alias-state-business-primary': colors.primary!,
     // ── switch ────────────────────────────────────────────────
-    '--dsw-alias-switch-thumb': colors.primary!,
+    // switch-thumb 是关闭态的滑块色，语义是中性前景：内置暗色主题取其调色板
+    // 中档中性色（neutral-bluish-400），浅色主题取近白。映射成 primary 会让
+    // 关闭态滑块带上强调色调（实测 #d9c3ab，彩度 46），与原生纯灰不符。
+    // on_surface_variant 是中性前景色，彩度 10、对轨道亮度比 9.05，最贴近原生。
+    '--dsw-alias-switch-thumb': colors.on_surface_variant!,
     // ── menu & overlay ────────────────────────────────────────
     '--dsw-alias-menu-icon': colors.on_surface_variant!,
     '--dsw-alias-menu-group-header-fill': surface[4],
