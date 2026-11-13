@@ -263,7 +263,9 @@ function mapColors(colors: MatugenColors): ThemeTokenTable {
     '--dsw-specific-sidebar-glass-collapsed-fill': colors.surface_container_lowest!,
     '--dsw-specific-sidebar-glass-collapsed-hover': colors.surface_container_low!,
     '--dsw-specific-sidebar-nav-item-active': colors.surface_container_high!,
-    '--dsw-specific-sidebar-nav-item-active-accent': colors.primary!,
+    // 该 token 也作为「推荐」徽标等元素的文字底色，文字色是 button-info-fill
+    // （映射为 primary），因此这里必须用容器色保证对比。
+    '--dsw-specific-sidebar-nav-item-active-accent': colors.primary_container!,
     '--dsw-specific-sidebar-right-flash': colors.surface_container!,
     '--dsw-specific-sidebar-tint': colors.surface!,
     '--dsw-specific-sidebar-wash-bottom': colors.surface_dim!,
