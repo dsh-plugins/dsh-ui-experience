@@ -15,6 +15,7 @@ import { appendFileSync, existsSync, mkdirSync, readFileSync, statSync, writeFil
 import { readFile as readFileAsync, stat as statAsync } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { dirname, isAbsolute, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import z from '@deepseek-ai/schemastery'
 import { TypertRemoteService } from '@deepseek-ai/dsh-typert-protocol'
 import {
@@ -24,6 +25,7 @@ import {
   type SetMotionArgs, type SetMotionResult,
   type SetPathsArgs, type SetPathsResult, type ThemeTokenModes, type ThemeTokenTable,
 } from './shared.ts'
+import { MATUGEN_ROLES, mapColors, PALETTE_TOKENS, type MatugenColors } from './palette.ts'
 
 /** Plugin-owned diagnostics log: the Desktop host discards stdout/stderr, so
  *  operational events land here instead. Truncated once it outgrows the cap. */
@@ -121,21 +123,9 @@ type Config = {
   streamRollMs: VolatileValue<number>
 }
 
-/** Material You color roles the mapping consumes. */
-const REQUIRED_COLOR_KEYS = [
-  'surface_container_lowest', 'surface_container_low', 'surface_container',
-  'surface_container_high', 'surface_container_highest', 'surface_bright',
-  'on_surface', 'on_surface_variant', 'outline', 'outline_variant',
-  'primary', 'primary_container', 'on_primary',
-  'secondary', 'secondary_container',
-  'tertiary', 'tertiary_container',
-  'error', 'error_container',
-  'inverse_surface', 'inverse_on_surface',
-  'scrim', 'shadow',
-] as const
-
 /** Plain color value: a hex color, or a CSS function with no nested rules. */
 const HEX_COLOR = /^#[0-9a-fA-F]{6}([0-9a-fA-F]{2})?$/
+
 /**
  * A token value that cannot escape the declaration it is written into. Rendered
  * token values may legitimately be `color-mix(…)`, `rgb(…)`, or any other color
@@ -157,215 +147,6 @@ function isSafeTokenValue(value: string): boolean {
 /** Prototype property the Typert runtime reads for the Remote method table. */
 const REMOTE_METHOD_DESCRIPTOR = '@deepseek-ai/dsh-typert-protocol/remote-methods'
 
-/** One matugen colors table, keyed by Material color role. */
-type MatugenColors = Record<string, string>
-
-/**
- * DSW token mapping from one Material You scheme. The palette matugen emits
- * is a dark scheme, so the theme registers with colorScheme 'dark'; the
- * override layer still requires both modes, hence the same values on light.
- * @param colors - matugen colors table.
- * @returns DSW token overrides for one mode.
- */
-function mapColors(colors: MatugenColors): ThemeTokenTable {
-  // Material 的 surface 阶梯，由暗到亮。侧栏取最暗一级，主面板从第二级起，
-  // 其余表面按原有相对层级整体上移一级：主面板比原先更亮、侧栏更暗，各层
-  // 表面的相对明暗顺序不变。overlay 原本就居顶，阶梯没有更高的档位可用，
-  // 因此在最亮一级上加白提亮，保持它高于其余浮层。
-  const surface: readonly [string, string, string, string, string, string] = [
-    colors.surface_container_lowest!,
-    colors.surface_container_low!,
-    colors.surface_container!,
-    colors.surface_container_high!,
-    colors.surface_container_highest!,
-    colors.surface_bright!,
-  ]
-  return {
-    // ── surfaces ──────────────────────────────────────────────
-    '--dsw-alias-bg-base': surface[1],
-    '--dsw-alias-bg-layer-1': surface[2],
-    '--dsw-alias-bg-layer-2': surface[3],
-    '--dsw-alias-bg-layer-3': surface[4],
-    '--dsw-alias-bg-layer-4': surface[5],
-    '--dsw-alias-bg-overlay': `color-mix(in srgb, ${surface[5]}, white 8%)`,
-    // 内置主题的遮罩是半透明黑，直接取 scrim 会得到不透明纯黑，盖住下层界面。
-    '--dsw-alias-bg-mask-1': `color-mix(in srgb, ${colors.scrim!}, transparent 50%)`,
-    '--dsw-alias-bg-module-platform': surface[4],
-    '--dsw-alias-bg-skeleton': surface[4],
-    // ── borders — uniform outline_variant to avoid visual fragmentation ──
-    '--dsw-alias-border-l1': colors.outline_variant!,
-    '--dsw-alias-border-l2': colors.outline_variant!,
-    '--dsw-alias-border-l2-darkmode-thin': colors.outline_variant!,
-    '--dsw-alias-border-l3': colors.outline_variant!,
-    '--dsw-alias-border-l4': colors.outline_variant!,
-    // ── brand & labels ────────────────────────────────────────
-    '--dsw-alias-brand-primary': colors.primary!,
-    '--dsw-alias-brand-primary-new-colorprimary-new-color': colors.primary!,
-    '--dsw-alias-label-primary': colors.on_surface!,
-    '--dsw-alias-label-secondary': colors.on_surface_variant!,
-    '--dsw-alias-label-tertiary': colors.on_surface_variant!,
-    '--dsw-alias-label-caption': colors.on_surface_variant!,
-    '--dsw-alias-label-dimmed': colors.outline!,
-    '--dsw-alias-label-error': colors.error!,
-    '--dsw-alias-label-primary-foreground': colors.on_primary!,
-    '--dsw-alias-label-shimmer': colors.on_surface_variant!,
-    '--dsw-alias-link': colors.primary!,
-    // ── interactive ───────────────────────────────────────────
-    '--dsw-alias-interactive-bg-hover': surface[4],
-    '--dsw-alias-interactive-bg-active': surface[5],
-    '--dsw-alias-interactive-bg-hover-danger': colors.error_container!,
-    // ── buttons ───────────────────────────────────────────────
-    '--dsw-alias-button-primary-fill': colors.primary!,
-    '--dsw-alias-button-primary-hover': colors.primary!,
-    '--dsw-alias-button-info-fill': colors.primary!,
-    '--dsw-alias-button-ghost-active-fill': surface[4],
-    '--dsw-alias-button-ghost-active-border': colors.outline!,
-    '--dsw-alias-button-tool-bar-fill': surface[4],
-    '--dsw-alias-button-tool-bar-hover': surface[5],
-    '--dsw-alias-label-on-color': colors.on_primary!,
-    // ── states ────────────────────────────────────────────────
-    '--dsw-alias-state-error-primary': colors.error!,
-    '--dsw-alias-state-idle-primary': colors.outline!,
-    '--dsw-alias-state-success-primary': colors.tertiary!,
-    '--dsw-alias-state-success-tertiary': colors.tertiary_container!,
-    '--dsw-alias-state-warn-primary': colors.secondary!,
-    '--dsw-alias-state-warn-label': colors.secondary!,
-    '--dsw-alias-state-warn-tertiary': colors.secondary_container!,
-    '--dsw-alias-state-business-primary': colors.primary!,
-    // ── switch ────────────────────────────────────────────────
-    // switch-thumb 是关闭态滑块色，语义为中性前景，内置主题暗色取
-    // neutral-bluish-400（纯灰）、浅色取近白。映射成 primary 会让关闭态带上
-    // 强调色，映射成 on_surface_variant 又会把前景色渗进整体观感；这里不做
-    // 覆盖，保持原生纯灰，开关只在开启态轨道显示强调色。
-    // ── menu & overlay ────────────────────────────────────────
-    '--dsw-alias-menu-icon': colors.on_surface_variant!,
-    '--dsw-alias-menu-group-header-fill': surface[4],
-    '--dsw-alias-hovercard-bg': surface[4],
-    '--dsw-alias-hovercard-label-primary': colors.on_surface!,
-    // 官方契约里 tooltip 与 toast 始终是深色气泡配浅色文字，key 块是气泡色
-    // 混 18% 白。Material 的 inverse_* 在深色调色板下方向相反（浅底深字），
-    // 会让继承 label 色的键位提示变成深底深字，故这里改用容器面与前景色。
-    '--dsw-alias-tooltip-bg': surface[4],
-    '--dsw-alias-tooltip-label': colors.on_surface!,
-    '--dsw-alias-tooltip-key-bg': `color-mix(in srgb, ${surface[4]}, white 18%)`,
-    '--dsw-alias-toast-bg': surface[4],
-    '--dsw-alias-toast-label': colors.on_surface!,
-    '--dsw-alias-toast-action': colors.primary!,
-    // ── scrollbar ─────────────────────────────────────────────
-    '--dsw-alias-scrollbar-bg-l2': surface[2],
-    '--dsw-alias-scrollbar-hover-l2': surface[4],
-    // ── markdown & code ───────────────────────────────────────
-    '--dsw-alias-markdown-code-block': surface[2],
-    '--dsw-alias-markdown-code-block-banner': surface[3],
-    '--dsw-alias-markdown-inline-code': surface[4],
-    '--dsw-alias-markdown-tag': surface[4],
-    // ── JSON tree ─────────────────────────────────────────────
-    '--dsw-alias-json-tree-hover': surface[4],
-    '--dsw-alias-json-tree-icon': colors.on_surface_variant!,
-    '--dsw-alias-json-tree-keyword': colors.primary!,
-    '--dsw-alias-json-tree-number': colors.tertiary!,
-    '--dsw-alias-json-tree-property': colors.on_surface!,
-    '--dsw-alias-json-tree-punctuation': colors.on_surface_variant!,
-    '--dsw-alias-json-tree-string': colors.secondary!,
-    // ── diff ──────────────────────────────────────────────────
-    '--dsw-alias-code-diff-added': surface[4],
-    '--dsw-alias-code-diff-deleted': surface[4],
-    '--dsw-alias-file-diff-added-bg': surface[2],
-    '--dsw-alias-file-diff-added-marker': colors.tertiary!,
-    '--dsw-alias-file-diff-deleted-bg': surface[2],
-    '--dsw-alias-file-diff-deleted-marker': colors.error!,
-    // ── app-specific ──────────────────────────────────────────
-    '--dsw-specific-sidebar-fill': surface[0],
-    '--dsw-specific-input-major': surface[2],
-    '--dsw-specific-bubble': surface[2],
-    '--dsw-specific-menu': surface[3],
-    '--dsw-menu-surface-fill': surface[3],
-    '--dsw-focus-ring-color': colors.primary!,
-    // ── plugin-side surfaces & fills ──────────────────────────
-    '--dsw-alias-bg-document-preview': surface[2],
-    '--dsw-alias-bg-l1': surface[2],
-    '--dsw-alias-bg-mask-drop': `color-mix(in srgb, ${colors.scrim!}, transparent 30%)`,
-    '--dsw-alias-card-fill': surface[2],
-    '--dsw-alias-card-fill-hover': surface[3],
-    '--dsw-alias-card-tile-fill': surface[2],
-    '--dsw-alias-fill-l1': surface[2],
-    '--dsw-alias-fill-l2': surface[4],
-    '--dsw-alias-fill-tsp-secondary': surface[3],
-    '--dsw-alias-settings-card-fill': surface[2],
-    '--dsw-alias-settings-card-stroke': colors.outline_variant!,
-    '--dsw-alias-illustration-background': surface[1],
-    '--dsw-alias-illustration-backing': surface[2],
-    '--dsw-alias-illustration-detail': surface[3],
-    '--dsw-alias-illustration-inset': surface[0],
-    '--dsw-alias-illustration-shadow': colors.shadow!,
-    '--dsw-alias-illustration-surface': surface[4],
-    // ── plugin-side borders & separators ──────────────────────
-    '--dsw-alias-border-inverted': colors.inverse_surface!,
-    '--dsw-alias-border-selected': colors.primary!,
-    '--dsw-alias-separator-primary': colors.outline_variant!,
-    // ── plugin-side buttons ───────────────────────────────────
-    '--dsw-alias-button-contrast-fill': colors.inverse_surface!,
-    '--dsw-alias-button-elevated-fill': surface[4],
-    '--dsw-alias-button-floating-fill': surface[4],
-    '--dsw-alias-button-floating-hover': surface[5],
-    '--dsw-alias-button-info-hover': colors.primary_container!,
-    // ── plugin-side labels ────────────────────────────────────
-    '--dsw-alias-label-deep-diving': colors.primary!,
-    '--dsw-alias-label-deep-diving-shimmer': colors.secondary!,
-    '--dsw-alias-label-primary-bluish': colors.on_surface!,
-    '--dsw-alias-label-primary-dimmed': colors.on_surface_variant!,
-    '--dsw-alias-label-primary-inverted': colors.inverse_on_surface!,
-    '--dsw-alias-label-quaternary': colors.outline!,
-    '--dsw-alias-hovercard-label-secondary': colors.on_surface_variant!,
-    '--dsw-alias-hovercard-label-tertiary': colors.on_surface_variant!,
-    // ── plugin-side interactive & states ──────────────────────
-    '--dsw-alias-interactive-bg-hover-accent': colors.primary_container!,
-    '--dsw-alias-interactive-bg-hover-solid': surface[5],
-    '--dsw-alias-state-business-tertiary': colors.primary_container!,
-    '--dsw-alias-state-error-secondary': colors.error_container!,
-    '--dsw-alias-state-success-secondary': colors.tertiary_container!,
-    '--dsw-alias-state-warn-secondary': colors.secondary_container!,
-    '--dsw-alias-trajectory-accent': colors.primary!,
-    // ── charts, citations, onboarding, turn triggers ──────────
-    '--dsw-alias-chart-messages': colors.primary!,
-    '--dsw-alias-chart-system': colors.secondary!,
-    '--dsw-alias-chart-tools': colors.tertiary!,
-    '--dsw-alias-markdown-citation': surface[4],
-    '--dsw-alias-onboarding-accent': colors.primary!,
-    '--dsw-alias-onboarding-card-fill': surface[2],
-    '--dsw-alias-onboarding-checkbox-border': colors.outline!,
-    '--dsw-alias-onboarding-secondary-fill': surface[4],
-    '--dsw-alias-turn-trigger-bg': surface[4],
-    '--dsw-alias-turn-trigger-bg-hover': surface[5],
-    // ── plugin-side scrollbars ────────────────────────────────
-    '--dsw-alias-scrollbar-bg-l1': surface[0],
-    '--dsw-alias-scrollbar-hover-l1': surface[2],
-    // ── diff gutters ──────────────────────────────────────────
-    '--dsw-alias-file-diff-added-gutter': colors.tertiary_container!,
-    '--dsw-alias-file-diff-deleted-gutter': colors.error_container!,
-    // ── sidebar & misc specifics ──────────────────────────────
-    // 侧栏玻璃按钮是侧栏内层，取比侧栏底色高一级，避免与底色重合。tint 与
-    // wash 只在 macOS 上作为透明渐变叠加在侧栏之上，这里保持与底色同值。
-    '--dsw-specific-sidebar-glass-fill': surface[1],
-    '--dsw-specific-sidebar-glass-hover': surface[2],
-    '--dsw-specific-sidebar-glass-collapsed-fill': surface[1],
-    '--dsw-specific-sidebar-glass-collapsed-hover': surface[2],
-    '--dsw-specific-sidebar-nav-item-active': surface[4],
-    // 该 token 也作为「推荐」徽标等元素的文字底色，文字色是 button-info-fill
-    // （映射为 primary），因此这里必须用容器色保证对比。
-    '--dsw-specific-sidebar-nav-item-active-accent': colors.primary_container!,
-    '--dsw-specific-sidebar-right-flash': surface[3],
-    '--dsw-specific-sidebar-tint': surface[0],
-    '--dsw-specific-sidebar-wash-bottom': surface[0],
-    '--dsw-specific-sidebar-wash-bottom-clear': surface[0],
-    '--dsw-specific-sidebar-wash-top': surface[0],
-    '--dsw-specific-sidebar-wash-top-clear': surface[0],
-    '--dsw-specific-file-upload-track': surface[4],
-    '--dsw-specific-guide-hero': colors.primary!,
-    '--dsw-specific-selector': surface[4],
-  }
-}
-
 /**
  * Validate a matugen colors table.
  * @param value - parsed JSON value.
@@ -376,7 +157,7 @@ function validateColors(value: unknown): MatugenColors {
     throw new Error('matugen colors file is not a JSON object')
   }
   const colors = value as Record<string, unknown>
-  for (const key of REQUIRED_COLOR_KEYS) {
+  for (const key of MATUGEN_ROLES) {
     const color = colors[key]
     if (typeof color !== 'string' || !HEX_COLOR.test(color)) {
       throw new Error(`matugen colors file: role "${key}" is missing or not a hex color`)
@@ -560,25 +341,67 @@ function composePalette(
 }
 
 /**
- * Record how much of the palette the dedicated token file actually covers. A
- * sparse file is legitimate, but it silently leaves most tokens on the mapped
- * base (or, with no colors file, on the built-in palette), which looks like the
- * plugin doing nothing.
- * @param composed - the composed per-mode token tables.
+ * Record what the dedicated token file covers, per mode.
+ *
+ * With a colors file underneath, a partial token file is exactly the documented
+ * use — override the few tokens that matter and let the mapping supply the rest —
+ * so this only reports the counts. Without one, there is nothing to fall back on
+ * but the shipped palette, and since the colors file carries a single dark scheme
+ * the two modes are not interchangeable: naming the tokens that stay on the
+ * shipped palette is what makes that visible.
+ *
  * @param tokens - the parsed token document, when present.
  * @param mapped - the parsed matugen mapping, when present.
  */
-function auditCoverage(composed: ThemeTokenModes, tokens: ThemeTokenModes | undefined, mapped: ThemeTokenModes | undefined): void {
+function auditCoverage(tokens: ThemeTokenModes | undefined, mapped: ThemeTokenModes | undefined): void {
   if (tokens === undefined) return
-  const provided = Object.keys(tokens.dark).length
-  const total = Object.keys(composed.dark).length
-  if (mapped === undefined) {
-    logLine(`tokensPath has ${provided} tokens and no colorsPath base is present;`
-      + ' every other token keeps the built-in palette value')
+  if (mapped !== undefined) {
+    logLine(`palette composed from colorsPath mapping + tokensPath overrides`
+      + ` (light ${coverage(tokens.light)}/${PALETTE_TOKENS.length}, dark ${coverage(tokens.dark)}/${PALETTE_TOKENS.length})`)
     return
   }
-  logLine(`palette composed from colorsPath mapping (${Object.keys(mapped.dark).length} tokens)`
-    + ` + tokensPath overrides (${provided} tokens) = ${total} tokens`)
+  const missingLight = PALETTE_TOKENS.filter(token => typeof tokens.light[token] !== 'string')
+  const missingDark = PALETTE_TOKENS.filter(token => typeof tokens.dark[token] !== 'string')
+  logLine(`no colorsPath base: tokensPath covers light ${coverage(tokens.light)}/${PALETTE_TOKENS.length}`
+    + `, dark ${coverage(tokens.dark)}/${PALETTE_TOKENS.length}`)
+  if (missingLight.length > 0) {
+    logLine(`light mode keeps the shipped palette for ${missingLight.length} token(s): ${summarize(missingLight)}`)
+  }
+  if (missingDark.length > 0) {
+    logLine(`dark mode keeps the shipped palette for ${missingDark.length} token(s): ${summarize(missingDark)}`)
+  }
+  if (missingLight.length > 0 || missingDark.length > 0) {
+    logLine(`a complete template ships at ${templatePath()}; it covers every token in both modes`)
+  }
+}
+
+/**
+ * How many of the mapped tokens one table actually sets.
+ * @param table - one mode's token table.
+ * @returns the count, for diagnostics.
+ */
+function coverage(table: ThemeTokenTable): number {
+  return PALETTE_TOKENS.filter(token => typeof table[token] === 'string').length
+}
+
+/**
+ * Render a token list for one log line, truncated so a nearly empty palette does
+ * not write hundreds of names.
+ * @param tokens - the tokens to name.
+ * @returns the names, comma-separated, with a count for the remainder.
+ */
+function summarize(tokens: readonly string[]): string {
+  const shown = tokens.slice(0, LOGGED_TOKEN_NAMES)
+  const rest = tokens.length - shown.length
+  return rest > 0 ? `${shown.join(', ')}, and ${rest} more` : shown.join(', ')
+}
+
+/** Token names one log line spells out before it counts the rest. */
+const LOGGED_TOKEN_NAMES = 12
+
+/** Absolute path of the complete matugen template shipped with this bundle. */
+function templatePath(): string {
+  return fileURLToPath(new URL('../templates/dsh-tokens.json', import.meta.url))
 }
 
 /**
@@ -632,7 +455,7 @@ function readPaletteSync(config: Config): PaletteRead {
       return { ok: true, paths: sources.paths, palette: paletteCache }
     }
     const modes = composePalette(sources, mapped.modes, tokens.modes)
-    auditCoverage(modes, tokens.modes, mapped.modes)
+    auditCoverage(tokens.modes, mapped.modes)
     paletteCache = { source: sources.paths.tokens, version, tokens: modes }
     return { ok: true, paths: sources.paths, palette: paletteCache }
   } catch (error) {
@@ -683,7 +506,7 @@ async function readPalette(config: Config): Promise<PaletteRead> {
       return { ok: true, paths: sources.paths, palette: paletteCache }
     }
     const modes = composePalette(sources, mapped.modes, tokens.modes)
-    auditCoverage(modes, tokens.modes, mapped.modes)
+    auditCoverage(tokens.modes, mapped.modes)
     paletteCache = { source: sources.paths.tokens, version, tokens: modes }
     return { ok: true, paths: sources.paths, palette: paletteCache }
   } catch (error) {

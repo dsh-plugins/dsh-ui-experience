@@ -392,9 +392,23 @@ function registerClient(): void {
          */
         const toOverrides = (modes: ThemeTokenModes): Record<string, { light: string; dark: string }> => {
           const out: Record<string, { light: string; dark: string }> = {}
-          for (const [token, dark] of Object.entries(modes.dark)) {
-            const light = modes.light[token] ?? dark
-            if (typeof light === 'string' && light !== '') out[token] = { light, dark }
+          // The override layer needs both modes for every token it takes, so a
+          // token one table names and the other omits is skipped rather than
+          // carrying one mode's colour into the other. Say which, since a token
+          // file written for one mode alone would otherwise look half applied.
+          const oneSided: string[] = []
+          for (const token of new Set([...Object.keys(modes.dark), ...Object.keys(modes.light)])) {
+            const dark = modes.dark[token]
+            const light = modes.light[token]
+            if (typeof light === 'string' && light !== '' && typeof dark === 'string' && dark !== '') {
+              out[token] = { light, dark }
+            } else if (typeof light === 'string' || typeof dark === 'string') {
+              oneSided.push(token)
+            }
+          }
+          if (oneSided.length > 0) {
+            console.error(`ui-experience: ${oneSided.length} palette token(s) set for one mode only and skipped:`
+              + ` ${oneSided.slice(0, 8).join(', ')}${oneSided.length > 8 ? ', …' : ''}`)
           }
           return out
         }
