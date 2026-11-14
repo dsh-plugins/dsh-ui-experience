@@ -43,9 +43,23 @@
  * 1. The reader wins. A wheel or touch over a container being moved, or a scroll
  *    key outside a text field, cancels the run outright — it does not blend, and
  *    it does not resume. A position change this layer did not write cancels it
- *    too, which catches a scrollbar drag, an assistive-technology scroll, or a
- *    container that reflowed mid-run.
- * 2. The curve is the effects curve, never the spatial one. A spatial curve
+ *    too while the container's range is unchanged, which catches a scrollbar drag
+ *    and an assistive-technology scroll.
+ * 2. A reflow re-bases, it does not abandon. Scroll anchoring and the clamp after
+ *    content shrank both move a container without a scroll being raised, and both
+ *    happen under the animation whenever a height changes: the row above grows,
+ *    the reasoning block closes, the transcript is re-rendered. Abandoning the run
+ *    there leaves the viewport wherever layout dropped it, with the caller still
+ *    believing its scroll is in flight and the remaining travel measured from a
+ *    position that no longer exists. So the destination is kept, the position
+ *    layout chose becomes the new origin, the destination is re-clamped to the
+ *    range that exists now, and the travel left is timed again.
+ * 3. One container, one mover. A scripted run, a wheel segment and a follow glide
+ *    each write the same axis every frame, so two of them on one container write
+ *    over each other and the position jumps between two trajectories. A direct
+ *    position write from the application is a claim: it ends whatever this layer
+ *    is animating there.
+ * 4. The curve is the effects curve, never the spatial one. A spatial curve
  *    overshoots, and overshoot while scrolling sends the content past the row the
  *    reader was sent to before settling back — the destination lands wrong twice.
  */
@@ -84,13 +98,28 @@ interface ElementLike {
   scrollIntoView(options?: boolean | ScrollIntoViewOptions): void
 }
 
-/** One container's animated axis pair. */
+/** One container's animated axis pair. Both ends move when layout re-bases it. */
 interface Leg {
   readonly element: ElementLike
-  readonly fromTop: number
-  readonly fromLeft: number
-  readonly toTop: number
-  readonly toLeft: number
+  /** Where the current curve starts; the position layout chose when it re-bases. */
+  fromTop: number
+  fromLeft: number
+  /** Where it ends, re-clamped to the range that exists on every frame. */
+  toTop: number
+  toLeft: number
+}
+
+/**
+ * What one leg wrote, and the range it wrote against.
+ *
+ * The range is what tells a reflow apart from a scroll: layout moving a container
+ * always changes its range, a reader or an assistive-technology scroll never does.
+ */
+interface Written {
+  top: number
+  left: number
+  maxTop: number
+  maxLeft: number
 }
 
 /** The run currently in flight. */
@@ -98,11 +127,30 @@ interface Run {
   legs: Leg[]
   started: number
   duration: number
-  /** The last position this run wrote per leg, to notice a foreign scroll. */
-  written: Array<{ top: number; left: number }>
+  /** The last position this run wrote per leg, against the range it saw then. */
+  written: Written[]
   frame: number
   /** Callers whose promise settles when this run ends, however it ends. */
   readonly done: Array<() => void>
+}
+
+/** One container's eased follow toward the tail. */
+interface Glide {
+  /** Where it is heading; a tail glide re-reads this from the range every frame. */
+  target: number
+  /** Where the current curve starts. */
+  from: number
+  started: number
+  duration: number
+  frame: number
+  /** The position and range of the last frame it wrote. */
+  written: Written
+  /**
+   * Whether the destination is the container's floor rather than a fixed offset.
+   * Following the tail means following a position that moves as content is added,
+   * so this one is re-read from the range instead of being carried along.
+   */
+  readonly tail: boolean
 }
 
 /**
@@ -155,6 +203,8 @@ interface WheelRun {
   started: number
   /** Duration of the current segment. */
   duration: number
+  /** The position and range of the last frame this segment wrote. */
+  written: Written
   frame: number
 }
 
@@ -211,15 +261,7 @@ const EDITABLE = [
 ].join(', ')
 
 /** Inputs that mean the reader has taken over the container. */
-const TAKEOVER_EVENTS = ['wheel', 'touchstart', 'keydown'] as const
-
-/**
- * Shortest travel this layer turns into an animation when a caller asks for an
- * immediate jump. Anything smaller is a layout correction — a measurement cached
- * a pixel ago, an anchoring fix, a follow that is already at the floor — and
- * animating those would leave the viewport chasing its own content.
- */
-const JUMP_ANIMATE_MIN = 24
+const TAKEOVER_EVENTS = ['touchstart', 'keydown'] as const
 
 /** Wheel travel below this lands immediately, so the stream can end. */
 const WHEEL_SETTLE_PX = 0.5
@@ -387,6 +429,68 @@ export function createScrollMotion(): {
     else element.scrollLeft = value
   }
 
+  /**
+   * The offset a container is painted at, bypassing this layer's own getter.
+   *
+   * The patched getter reports a glide's target so the application's follow
+   * controller keeps its own bookkeeping straight, which makes it the wrong source
+   * for this layer's arithmetic: a curve anchored on, or a delta resolved against,
+   * a position the container is not at teleports the viewport on its first frame.
+   * The native accessor is the only honest answer, and only this file calls it.
+   *
+   * @param element - the container.
+   * @returns its painted offset.
+   */
+  function readTop(element: ElementLike): number {
+    return topAxis === undefined ? element.scrollTop : topAxis.get.call(element)
+  }
+
+  /**
+   * How a container moved since this layer last wrote it.
+   *
+   * `reflow` is layout re-placing the content after a height change — scroll
+   * anchoring compensating a row above the reading position, or a clamp after the
+   * content shrank. It changes the range. `foreign` is a scroll this layer did not
+   * make — a scrollbar drag, an assistive-technology scroll — and it cannot change
+   * the range, so the range is the discriminator between the two.
+   *
+   * @param element - the container.
+   * @param written - the position and range this layer last wrote.
+   * @returns the classification.
+   */
+  function movedSince(element: ElementLike, written: Written): 'none' | 'reflow' | 'foreign' {
+    const max = maxima(element)
+    const sameRange = Math.abs(max.top - written.maxTop) <= MOTION_EPSILON
+      && Math.abs(max.left - written.maxLeft) <= MOTION_EPSILON
+    const samePosition = Math.abs(readTop(element) - written.top) <= FOREIGN_TOLERANCE
+      && Math.abs(element.scrollLeft - written.left) <= FOREIGN_TOLERANCE
+    if (samePosition) return 'none'
+    return sameRange ? 'foreign' : 'reflow'
+  }
+
+  /**
+   * Where a container stands, and the range it stands in.
+   * @param element - the container.
+   * @returns the recorded position and range.
+   */
+  function record(element: ElementLike): Written {
+    const max = maxima(element)
+    return { top: readTop(element), left: element.scrollLeft, maxTop: max.top, maxLeft: max.left }
+  }
+
+  /**
+   * Overwrite an existing record after this layer moved the container.
+   * @param element - the container.
+   * @param written - the record to refresh.
+   */
+  function note(element: ElementLike, written: Written): void {
+    const max = maxima(element)
+    written.top = readTop(element)
+    written.left = element.scrollLeft
+    written.maxTop = max.top
+    written.maxLeft = max.left
+  }
+
   /** Stop withholding ends from every container still inside the grace window. */
   function clearGrace(): void {
     for (const element of graceful) shadowed.delete(element)
@@ -415,7 +519,7 @@ export function createScrollMotion(): {
     if (!shadowed.has(element)) return
     shadowed.set(element, {
       until: performance.now() + END_GRACE_MS,
-      top: element.scrollTop,
+      top: readTop(element),
       left: element.scrollLeft,
     })
     graceful.add(element)
@@ -439,8 +543,8 @@ export function createScrollMotion(): {
    * Stop the in-flight run where it is.
    * @param notify - whether its containers owe their consumer an end.
    */
-  function cancel(notify = true): void {
-    stopWheel()
+  function cancel(notify = true, element?: ElementLike): void {
+    stopWheel(element)
     const active = run
     if (active === undefined) return
     window.cancelAnimationFrame(active.frame)
@@ -450,41 +554,101 @@ export function createScrollMotion(): {
   }
 
   /**
-   * One animation frame: advance every leg, or land on the target.
+   * Reconcile one leg with the container before this frame writes it.
+   *
+   * The run's origin is a position the browser may have replaced since the last
+   * frame: a height above the reading position changed, so layout moved the
+   * container and scrolled it back to keep the content still. The recorded origin
+   * is then stale, and the remaining travel measured from it overshoots by
+   * exactly what layout took away. So the origin becomes where layout put the
+   * container, the destination is re-clamped to the range that exists now, and
+   * the curve is timed again over the distance actually left.
+   *
+   * A move with the range unchanged is not layout; it is a scroll this layer did
+   * not make, and the reader is in charge.
+   *
+   * @param leg - the leg being advanced.
+   * @param written - what this leg last wrote.
+   * @returns `stop` when the run must end, `reflow` when the travel was re-based.
+   */
+  function rebase(leg: Leg, written: Written): 'none' | 'reflow' | 'stop' {
+    const moved = movedSince(leg.element, written)
+    if (moved === 'foreign') return 'stop'
+    if (moved === 'reflow') {
+      leg.fromTop = readTop(leg.element)
+      leg.fromLeft = leg.element.scrollLeft
+    }
+    const max = maxima(leg.element)
+    // A destination outside the range cannot be reached, and a last frame that
+    // still asked for it would land on whatever the browser clamped to.
+    leg.toTop = Math.max(0, Math.min(leg.toTop, max.top))
+    leg.toLeft = Math.max(0, Math.min(leg.toLeft, max.left))
+    note(leg.element, written)
+    return moved
+  }
+
+  /**
+   * End whatever this layer is animating on one container.
+   *
+   * A direct position write is the application claiming where the container goes.
+   * A curve still running there would drag it back on its next frame, so the
+   * claim ends the curve instead of competing with it.
+   *
+   * @param element - the container being taken over.
+   */
+  function claim(element: ElementLike): void {
+    const active = run
+    if (active !== undefined && active.legs.some(leg => leg.element === element)) cancel(true, element)
+    else stopWheel(element)
+  }
+
+  /**
+   * One animation frame: re-base every leg on where layout left it, then advance
+   * the curve, or land on the target.
    * @param now - the frame timestamp the browser supplies.
    */
   function step(now: number): void {
     const active = run
     if (active === undefined) return
-    const elapsed = now - active.started
-    const progress = active.duration <= 0 ? 1 : Math.min(1, elapsed / active.duration)
-    const eased = easeCurve(effectCurvePoints((settings as MotionSettings).mode), progress)
-    // Verify every leg before writing any of them, so no leg is judged against a
-    // position this same frame just changed. Writing one container does not move
-    // another synchronously, but keeping the check ahead of the writes makes that
-    // independence an invariant of the loop rather than a property of the browser.
+    // Every leg is reconciled before any of them is written, so no leg is judged
+    // against a position this same frame just changed. Writing one container does
+    // not move another synchronously, but keeping the check ahead of the writes
+    // makes that independence an invariant of the loop rather than a property of
+    // the browser.
+    let rebased = false
     for (let index = 0; index < active.legs.length; index += 1) {
       const leg = active.legs[index]
       const written = active.written[index]
       if (leg === undefined || written === undefined) continue
-      if (Math.abs(leg.element.scrollTop - written.top) > FOREIGN_TOLERANCE
-        || Math.abs(leg.element.scrollLeft - written.left) > FOREIGN_TOLERANCE) {
+      const moved = rebase(leg, written)
+      if (moved === 'stop') {
         cancel()
         return
       }
+      if (moved === 'reflow') rebased = true
     }
+    if (rebased) {
+      // The travel left is not the travel the curve was timed for. A reflow that
+      // left the container on its destination — the clamp after content shrank lands
+      // exactly there — owes its consumer an end now, not after a curve over nothing.
+      const left = scrollDistance(active.legs)
+      active.started = now
+      active.duration = left <= MOTION_EPSILON ? 0 : scrollDurationMs(left, settings as MotionSettings)
+    }
+    const elapsed = now - active.started
+    const progress = active.duration <= 0 ? 1 : Math.min(1, elapsed / active.duration)
+    const eased = easeCurve(effectCurvePoints((settings as MotionSettings).mode), progress)
     for (const leg of active.legs) {
       const top = progress >= 1 ? leg.toTop : leg.fromTop + (leg.toTop - leg.fromTop) * eased
       const left = progress >= 1 ? leg.toLeft : leg.fromLeft + (leg.toLeft - leg.fromLeft) * eased
-      if (leg.element.scrollTop !== top) writeAxis(leg.element, 'top', top)
+      if (readTop(leg.element) !== top) writeAxis(leg.element, 'top', top)
       if (leg.element.scrollLeft !== left) writeAxis(leg.element, 'left', left)
     }
     for (let index = 0; index < active.legs.length; index += 1) {
       const leg = active.legs[index]
       const written = active.written[index]
       if (leg === undefined || written === undefined) continue
-      written.top = leg.element.scrollTop
-      written.left = leg.element.scrollLeft
+      note(leg.element, written)
     }
     if (progress >= 1) {
       // The final frame writes the un-eased target. The browser may snap it to a
@@ -507,15 +671,34 @@ export function createScrollMotion(): {
     // `apply` only installs the patches when it has settings, so a run cannot begin
     // without them.
     const active = settings as MotionSettings
-    for (const leg of legs) hold(leg.element)
+    const written = prepare(legs)
     run = {
       legs: [...legs],
       started: performance.now(),
       duration: scrollDurationMs(scrollDistance(legs), active),
-      written: legs.map(leg => ({ top: leg.element.scrollTop, left: leg.element.scrollLeft })),
+      written,
       frame: window.requestAnimationFrame(step),
       done: [done],
     }
+  }
+
+  /**
+   * Take over each of a run's containers: end any glide still easing one, shadow
+   * it, and record where it was left.
+   * @param legs - the legs the run will move.
+   * @returns the recorded positions, indexed like the legs.
+   */
+  function prepare(legs: readonly Leg[]): Written[] {
+    const written: Written[] = []
+    for (const leg of legs) {
+      // One container, one mover: a glide still easing this one would keep writing
+      // the axis the run is about to own, and the two curves would alternate. The
+      // handover is silent; this run owes the consumer its end.
+      finishGlide(leg.element, false, false)
+      hold(leg.element)
+      written.push(record(leg.element))
+    }
+    return written
   }
 
   /**
@@ -544,7 +727,7 @@ export function createScrollMotion(): {
     active.legs = [...legs]
     active.started = performance.now()
     active.duration = scrollDurationMs(scrollDistance(legs), settings as MotionSettings)
-    active.written = legs.map(leg => ({ top: leg.element.scrollTop, left: leg.element.scrollLeft }))
+    active.written = prepare(legs)
     active.done.push(done)
     return true
   }
@@ -568,17 +751,11 @@ export function createScrollMotion(): {
    *
    * So while a glide runs, the getter reports the value that was asked for. The
    * controller's bookkeeping then matches its own request exactly, `movedByReader`
-   * stays false for our own motion, and `nearBottom` keeps following on. Only the
-   * real accessor sees intermediate positions, and only this file calls it.
+   * stays false for our own motion, and `nearBottom` keeps following on — the last
+   * of those matters most on a process body, whose tolerance is one pixel. Only
+   * `readTop` asks the native accessor for the painted offset.
    */
-  const glides = new Map<ElementLike, {
-    target: number
-    from: number
-    started: number
-    duration: number
-    frame: number
-    written: number
-  }>()
+  const glides = new Map<ElementLike, Glide>()
 
   /** Last write time per container, to recognise a per-frame driver. */
   const lastWrite = new WeakMap<ElementLike, number>()
@@ -619,13 +796,13 @@ export function createScrollMotion(): {
     if (wantsInstant()) return false
     const max = maxima(element)
     if (max.top <= 0) return false
-    const delta = value - topAxis!.get.call(element)
+    const delta = value - readTop(element)
     const size = Math.abs(delta)
     if (size < GLIDE_MIN_PX || size > GLIDE_MAX_PX) return false
     // Must be heading for the floor: that is what following means.
     if (delta > 0 && Math.abs(value - max.top) > 4) return false
     // Already too far behind to catch up smoothly: land it.
-    if (max.top - topAxis!.get.call(element) > GLIDE_MAX_LAG_PX) return false
+    if (max.top - readTop(element) > GLIDE_MAX_LAG_PX) return false
     const previous = lastWrite.get(element)
     lastWrite.set(element, now)
     if (previous !== undefined && now - previous < GLIDE_FRAME_GAP_MS) return false
@@ -633,41 +810,86 @@ export function createScrollMotion(): {
   }
 
   /**
-   * Start or re-aim a glide.
-   * @param element - the container.
-   * @param target - the value the caller asked for.
+   * How long a glide of this distance takes.
+   * @param distance - pixels left to travel.
+   * @param active - the settings in force.
+   * @returns the duration in milliseconds.
    */
-  function startGlide(element: ElementLike, target: number): void {
+  function glideDuration(distance: number, active: MotionSettings): number {
+    const raw = Math.min(GLIDE_MAX_MS, Math.max(GLIDE_MIN_MS, distance / GLIDE_PX_PER_MS)) * active.durationScale
+    return active.quantize ? quantizeMs(raw) : raw
+  }
+
+  /**
+   * Start or re-aim a glide.
+   *
+   * @param element - the container.
+   * @param value - the value the caller asked for.
+   */
+  function startGlide(element: ElementLike, value: number): void {
     const active = settings as MotionSettings
+    // One container, one mover: a scripted run or a wheel segment writing the same
+    // axis would alternate with this curve, so the application's own write, which
+    // is a claim on the position, ends them first.
+    claim(element)
     const existing = glides.get(element)
     if (existing !== undefined) window.cancelAnimationFrame(existing.frame)
     else hold(element)
-    const from = topAxis!.get.call(element)
-    const raw = Math.abs(target - from) / GLIDE_PX_PER_MS
-    const duration = Math.min(GLIDE_MAX_MS, Math.max(GLIDE_MIN_MS, raw)) * active.durationScale
-    const glide = {
+    const from = readTop(element)
+    const max = maxima(element)
+    const target = Math.max(0, Math.min(value, max.top))
+    const glide: Glide = {
       target,
       from,
       started: performance.now(),
-      duration: active.quantize ? quantizeMs(duration) : duration,
+      duration: glideDuration(Math.abs(target - from), active),
       frame: 0,
-      written: from,
+      written: record(element),
+      tail: Math.abs(target - max.top) <= 1,
     }
     glides.set(element, glide)
     const mode = active.mode
     const step = (now: number): void => {
       const live = glides.get(element)
       if (live !== glide) return
-      // Someone else moved it: a reader gesture, a reflow, a layout correction. The
-      // getter must stop claiming the target at that point.
-      if (Math.abs(topAxis!.get.call(element) - glide.written) > 1) {
+      const moved = movedSince(element, glide.written)
+      if (moved === 'foreign') {
+        // The reader, a scrollbar drag or assistive technology took the container.
         finishGlide(element, false)
         return
       }
+      const max = maxima(element)
+      if (moved === 'reflow') {
+        // Layout moved the container under the glide, as it does when the content
+        // above grows or shrinks. The destination moves with the content: a fixed
+        // offset is shifted by the same distance the container was shifted, so the
+        // glide keeps heading for the same place in the transcript instead of
+        // travelling back the way layout just came.
+        const current = readTop(element)
+        if (!glide.tail) glide.target += current - glide.written.top
+        glide.from = current
+        glide.started = now
+      }
+      // A tail glide follows the floor, which layout may have moved either way; a
+      // fixed offset only needs clamping to the range that exists now.
+      glide.target = glide.tail ? max.top : Math.max(0, Math.min(glide.target, max.top))
+      if (Math.abs(glide.target - glide.from) > GLIDE_MAX_PX) {
+        // A reflow — a history load landing above, content collapsing below — can put
+        // the destination arbitrarily far away. Sweeping that distance would read as
+        // the viewport being thrown, so it lands now and the write after it resumes
+        // following from there.
+        finishGlide(element, true)
+        return
+      }
+      if (moved === 'reflow') {
+        const left = Math.abs(glide.target - glide.from)
+        glide.duration = left <= MOTION_EPSILON ? 0 : glideDuration(left, active)
+      }
+      note(element, glide.written)
       const progress = Math.min(1, (now - glide.started) / Math.max(1, glide.duration))
       const eased = easeCurve(effectCurvePoints(mode), progress)
       writeAxis(element, 'top', glide.from + (glide.target - glide.from) * eased)
-      glide.written = topAxis!.get.call(element)
+      note(element, glide.written)
       if (progress >= 1) {
         finishGlide(element, true)
         return
@@ -681,14 +903,18 @@ export function createScrollMotion(): {
    * End a glide.
    * @param element - the container.
    * @param landed - whether to land exactly on the target.
+   * @param notify - whether the consumer is owed the end. A container handed to
+   * another animation stays silent: that animation raises the end instead, and a
+   * consumer told the scroll finished would act on it — the chat follows the tail
+   * on `scrollend`, which would cancel the run that just took the container over.
    */
-  function finishGlide(element: ElementLike, landed: boolean): void {
+  function finishGlide(element: ElementLike, landed: boolean, notify = true): void {
     const glide = glides.get(element)
     if (glide === undefined) return
     window.cancelAnimationFrame(glide.frame)
     glides.delete(element)
     if (landed) writeAxis(element, 'top', glide.target)
-    release(element, true)
+    release(element, notify)
   }
 
   /** End every glide, landing each exactly. */
@@ -696,13 +922,55 @@ export function createScrollMotion(): {
     for (const [element] of glides) finishGlide(element, true)
   }
 
-  /** Stop the wheel run without landing, leaving the viewport where it is. */
-  function stopWheel(): void {
+  /**
+   * Stop the wheel run without landing, leaving the viewport where it is.
+   * @param element - the container whose segment to stop; omitted stops whichever
+   * one is running, which is what a reader takeover means.
+   */
+  function stopWheel(element?: ElementLike): void {
     const active = wheel
     if (active === undefined) return
+    if (element !== undefined && active.element !== element) return
     window.cancelAnimationFrame(active.frame)
     wheel = undefined
     release(active.element, true)
+  }
+
+  /**
+   * Bring a segment's accumulated target up to date with where the container is.
+   *
+   * A notch is a distance, not a place. Layout that shifts the container — a
+   * history chunk landing above, a group collapsing — shifts what is left of that
+   * distance too, and carrying the old absolute offset over sends the viewport
+   * back the way the content just came. The shift is measured against the position
+   * this segment last wrote, so a scroll it did not make still counts as a takeover.
+   *
+   * Called both from the frame and from a new notch: a notch can arrive in the same
+   * task as the layout change, before any frame has had a chance to reconcile.
+   *
+   * @param active - the segment.
+   * @param now - the timestamp to time the remaining travel from.
+   * @returns whether the segment may continue.
+   */
+  function alignWheel(active: WheelRun, now: number): boolean {
+    const element = active.element
+    const moved = movedSince(element, active.written)
+    if (moved === 'foreign') return false
+    if (moved === 'reflow') {
+      active.top += readTop(element) - active.written.top
+      active.left += element.scrollLeft - active.written.left
+      active.fromTop = readTop(element)
+      active.fromLeft = element.scrollLeft
+      active.started = now
+      const travelled = Math.max(Math.abs(active.top - active.fromTop), Math.abs(active.left - active.fromLeft))
+      active.duration = travelled <= MOTION_EPSILON ? 0
+        : Math.min(WHEEL_MAX_MS, scrollDurationMs(travelled, settings as MotionSettings))
+    }
+    const max = maxima(element)
+    active.top = Math.max(0, Math.min(active.top, max.top))
+    active.left = Math.max(0, Math.min(active.left, max.left))
+    note(element, active.written)
+    return true
   }
 
   /**
@@ -714,6 +982,13 @@ export function createScrollMotion(): {
     const active = wheel
     if (active === undefined) return
     const element = active.element
+    if (!alignWheel(active, now)) {
+      // Something other than this segment moved the container: the reader is in
+      // charge now, and the segment must not drag it back.
+      wheel = undefined
+      release(element, true)
+      return
+    }
     const progress = active.duration <= 0 ? 1 : Math.min(1, (now - active.started) / active.duration)
     const eased = easeCurve(effectCurvePoints((settings as MotionSettings).mode), progress)
     if (progress >= 1) {
@@ -725,6 +1000,7 @@ export function createScrollMotion(): {
     }
     writeAxis(element, 'top', active.fromTop + (active.top - active.fromTop) * eased)
     writeAxis(element, 'left', active.fromLeft + (active.left - active.fromLeft) * eased)
+    note(element, active.written)
     active.frame = window.requestAnimationFrame(wheelStep)
   }
 
@@ -757,10 +1033,21 @@ export function createScrollMotion(): {
       left: event.deltaX !== 0,
     })
     if (element === null) return false
-    const max = maxima(element)
     const delta = pixelDelta(event, element)
-    const base = wheel?.element === element ? wheel : undefined
-    const fromTop = element.scrollTop
+    let base = wheel?.element === element ? wheel : undefined
+    // The previous segment may be older than the layout: reconcile it before its
+    // accumulated target is used as this notch's origin.
+    if (base !== undefined && !alignWheel(base, performance.now())) {
+      // Something else moved the container, so that segment is over. It has to be
+      // dropped here rather than left to its next frame, which reads the module's
+      // segment and would step the one this call is about to create.
+      window.cancelAnimationFrame(base.frame)
+      wheel = undefined
+      release(element, true)
+      base = undefined
+    }
+    const max = maxima(element)
+    const fromTop = readTop(element)
     const fromLeft = element.scrollLeft
     const top = Math.min(max.top, Math.max(0, (base?.top ?? fromTop) + delta.y))
     const left = Math.min(max.left, Math.max(0, (base?.left ?? fromLeft) + delta.x))
@@ -788,6 +1075,7 @@ export function createScrollMotion(): {
       fromLeft,
       started: performance.now(),
       duration: Math.min(WHEEL_MAX_MS, scrollDurationMs(travelled, active)),
+      written: record(element),
       frame: 0,
     }
     wheel = segment
@@ -840,20 +1128,6 @@ export function createScrollMotion(): {
   }
 
   /**
-   * Whether a caller's immediate jump should be animated. Only a request that
-   * says "instant" and asks for real travel qualifies; a plain property write or
-   * an `auto` request stays immediate, because layout code uses those for
-   * corrections where a delayed position would be a bug rather than a nicety.
-   * @param behavior - the requested behavior.
-   * @param distance - how far the request would move each axis.
-   * @returns whether to animate it.
-   */
-  function animates(behavior: ScrollToOptions['behavior'], distance: { top: number; left: number }): boolean {
-    return behavior === 'instant'
-      && Math.max(distance.top, distance.left) >= JUMP_ANIMATE_MIN
-  }
-
-  /**
    * The patched `scrollIntoView`.
    *
    * The final offset depends on alignment, `scroll-margin`, nested containers and
@@ -881,14 +1155,14 @@ export function createScrollMotion(): {
     // Shadow before the jump: its own end must not reach a consumer that is about
     // to be told the run finished.
     for (const element of tracked) hold(element)
-    const before = tracked.map(element => ({ top: element.scrollTop, left: element.scrollLeft }))
+    const before = tracked.map(element => ({ top: readTop(element), left: element.scrollLeft }))
     shipped.scrollIntoView.call(this, jump)
     const legs: Leg[] = []
     for (let index = 0; index < tracked.length; index += 1) {
       const element = tracked[index]
       const origin = before[index]
       if (element === undefined || origin === undefined) continue
-      const landed = { top: element.scrollTop, left: element.scrollLeft }
+      const landed = { top: readTop(element), left: element.scrollLeft }
       // Put the container back before anything paints, then animate to the place
       // the browser said it belonged.
       writeAxis(element, 'top', origin.top)
@@ -944,11 +1218,13 @@ export function createScrollMotion(): {
    */
   function legFor(element: ElementLike, top: number | undefined, left: number | undefined): Leg | undefined {
     const max = maxima(element)
-    const toTop = top === undefined ? element.scrollTop : Math.min(max.top, Math.max(0, top))
-    const toLeft = left === undefined ? element.scrollLeft : Math.min(max.left, Math.max(0, left))
-    if (Math.abs(toTop - element.scrollTop) < MOTION_EPSILON
-      && Math.abs(toLeft - element.scrollLeft) < MOTION_EPSILON) return undefined
-    return { element, fromTop: element.scrollTop, fromLeft: element.scrollLeft, toTop, toLeft }
+    const fromTop = readTop(element)
+    const fromLeft = element.scrollLeft
+    const toTop = top === undefined ? fromTop : Math.min(max.top, Math.max(0, top))
+    const toLeft = left === undefined ? fromLeft : Math.min(max.left, Math.max(0, left))
+    if (Math.abs(toTop - fromTop) < MOTION_EPSILON
+      && Math.abs(toLeft - fromLeft) < MOTION_EPSILON) return undefined
+    return { element, fromTop, fromLeft, toTop, toLeft }
   }
 
   /**
@@ -973,7 +1249,7 @@ export function createScrollMotion(): {
     const active = settings
     if (active === undefined || wantsInstant()) return shippedMethod.apply(element, args)
     const base = relative
-      ? { top: element.scrollTop, left: element.scrollLeft }
+      ? { top: readTop(element), left: element.scrollLeft }
       : { top: 0, left: 0 }
     const request = readOffsets(options as ScrollToOptions, base)
     const leg = legFor(element, request.top, request.left)
@@ -985,18 +1261,12 @@ export function createScrollMotion(): {
         if (!merge([leg], resolve)) start([leg], resolve)
       })
     }
-    if (!animates(behavior, {
-      top: Math.abs(leg.toTop - leg.fromTop),
-      left: Math.abs(leg.toLeft - leg.fromLeft),
-    })) {
-      // Small immediate jumps are layout corrections: they must land now, and the
-      // caller may read the position back on the next line.
-      shippedMethod.apply(element, args)
-      return Promise.resolve()
-    }
-    // A long immediate jump — a control that sends the viewport to the far end of
-    // a document — reads as movement, so it is eased like one.
-    return new Promise<void>(resolve => { start([leg], resolve) })
+    // An immediate request is a request to be there already: its caller reads the
+    // position back on the very next line to decide where the viewport is
+    // (`ScrollFollow.jump` in the chat does exactly that), so easing it would answer
+    // that read with the position the container is leaving.
+    shippedMethod.apply(element, args)
+    return Promise.resolve()
   }
 
   /** The patched `scrollTo`. */
@@ -1039,7 +1309,7 @@ export function createScrollMotion(): {
     // An end owed for the run's final write arrives while the container is still
     // where the run left it. Anything that moved it since belongs to a later
     // scroll, and is released even inside the deadline.
-    const unmoved = Math.abs(target.scrollTop - entry.top) <= FOREIGN_TOLERANCE
+    const unmoved = Math.abs(readTop(target) - entry.top) <= FOREIGN_TOLERANCE
       && Math.abs(target.scrollLeft - entry.left) <= FOREIGN_TOLERANCE
     if (!unmoved || performance.now() > entry.until) {
       shadowed.delete(target)
@@ -1143,9 +1413,11 @@ export function createScrollMotion(): {
     prototype.scrollBy = scrollBy
     prototype.scrollIntoView = scrollIntoView
     // The transcript follows with a plain `scrollTop` assignment, so that is the one
-    // write that has to be eased. The getter reports the target while a glide runs,
-    // which is what keeps the caller's immediate read-back — and therefore its follow
-    // decision — correct.
+    // write that has to be eased. While a glide runs the getter reports its target:
+    // the caller's read-back has to see the value it asked for, and its follow
+    // decision is taken from that read. This layer's own arithmetic therefore never
+    // reads the property (`readTop`), since a target the container has not reached is
+    // not a position any curve may be anchored on.
     if (topAxis !== undefined) {
       Object.defineProperty(Element.prototype, 'scrollTop', {
         configurable: true,
@@ -1155,11 +1427,19 @@ export function createScrollMotion(): {
           return glide === undefined ? topAxis.get.call(this) : glide.target
         },
         set(this: ElementLike, value: number) {
-          if (writing > 0 || !shouldGlide(this, value, performance.now())) {
+          if (writing > 0) {
             topAxis.set.call(this, value)
             return
           }
-          startGlide(this, value)
+          if (shouldGlide(this, value, performance.now())) {
+            startGlide(this, value)
+            return
+          }
+          // The application decided where the container goes. Whatever curve this
+          // layer is running there would drag it back next frame, so the write ends
+          // it first — a claim, not a blend.
+          claim(this)
+          topAxis.set.call(this, value)
         },
       })
     }
@@ -1171,7 +1451,7 @@ export function createScrollMotion(): {
     ;(window.addEventListener as (kind: string, listener: unknown, capture: unknown) => void)(
       'wheel', onWheelBubble, { capture: false, passive: false },
     )
-    for (const kind of ['touchstart', 'keydown'] as const) {
+    for (const kind of TAKEOVER_EVENTS) {
       window.addEventListener(kind, onTakeover, { capture: true, passive: true })
     }
   }
@@ -1204,7 +1484,7 @@ export function createScrollMotion(): {
     ;(window.removeEventListener as (kind: string, listener: unknown, capture: unknown) => void)(
       'wheel', onWheelBubble, false,
     )
-    for (const kind of ['touchstart', 'keydown'] as const) {
+    for (const kind of TAKEOVER_EVENTS) {
       window.removeEventListener(kind, onTakeover, true)
     }
   }
