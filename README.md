@@ -19,13 +19,15 @@ DeepSeek Harness 的界面体验插件（`@dsh-plugin/dsh-ui-experience`）。
 
 ## 安装
 
-通过「插件管理器 → 添加插件 → 安装第三方插件」安装，粘贴 Git 仓库地址：
+插件要求 DSH `^0.2.3-alpha.2`，运行时由宿主提供 Typert 协议。
 
-```
+在「插件管理器 → 添加插件 → 安装第三方插件」中，可填写以下 Git 地址：
+
+```text
 git+https://github.com/dsh-plugins/dsh-ui-experience.git
 ```
 
-地址必须以 `git+` 开头，裸 `https://` 不会被识别为 Git 仓库。构建产物 `lib/` 已入库，目标设备无需构建环境，安装后按提示重启 DSH。
+验证本地改动时，在插件管理器移除已安装的同名发行版，再通过「添加插件」选择本地源码目录。修改源码后先运行 `pnpm build` 更新 `lib/` 中的构建产物。
 
 ## 配置
 
